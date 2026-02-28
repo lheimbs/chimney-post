@@ -5,6 +5,19 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
 
+pub const DEFAULT_MESSAGE_TEMPLATE: &str = "\
+{%- if from %}From: {{ from }}
+{% endif %}\
+{%- if to %}To: {{ to }}
+{% endif %}\
+{%- if subject %}Subject: {{ subject }}{% else %}Subject: (none){% endif %}
+
+{%- if body and body is string and body | trim %}
+{{ body }}\
+{% else %}
+(empty message body)\
+{% endif %}";
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
     pub smtp: SmtpConfig,
@@ -29,11 +42,17 @@ pub struct MatrixConfig {
     pub store_path: String,
     #[serde(default = "default_require_e2ee")]
     pub require_e2ee: bool,
+    #[serde(default = "default_message_template")]
+    pub message_template: String,
     pub credentials: MatrixCredentials,
 }
 
 fn default_require_e2ee() -> bool {
     true
+}
+
+fn default_message_template() -> String {
+    DEFAULT_MESSAGE_TEMPLATE.to_string()
 }
 
 #[derive(Clone, Deserialize)]
@@ -166,6 +185,32 @@ impl Config {
             }
         }
 
+        // Validate the message template by parsing and trial-rendering it
+        {
+            let mut env = minijinja::Environment::new();
+            env.set_auto_escape_callback(|_| minijinja::AutoEscape::None);
+            env.add_template("message", &self.matrix.message_template)
+                .map_err(|error| {
+                    ChimneyError::Config(format!(
+                        "matrix.message_template failed to parse: {error}"
+                    ))
+                })?;
+            let tmpl = env.get_template("message").map_err(|error| {
+                ChimneyError::Config(format!("matrix.message_template internal error: {error}"))
+            })?;
+            let test_ctx = minijinja::context! {
+                from => "test@example.com",
+                to => "recipient@example.com",
+                subject => "Test Subject",
+                body => "Test body",
+            };
+            tmpl.render(test_ctx).map_err(|error| {
+                ChimneyError::Config(format!(
+                    "matrix.message_template trial render failed: {error}"
+                ))
+            })?;
+        }
+
         Ok(())
     }
 
@@ -225,6 +270,7 @@ mod tests {
                 room_id: "!room:example.org".to_string(),
                 store_path: "/tmp/matrix".to_string(),
                 require_e2ee: true,
+                message_template: default_message_template(),
                 credentials: MatrixCredentials {
                     password: None,
                     access_token: None,
@@ -244,5 +290,43 @@ mod tests {
 
         let result = config.validate();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_rejects_invalid_template() {
+        let config = Config {
+            smtp: SmtpConfig {
+                bind: "127.0.0.1:2525".to_string(),
+                max_message_size: 1024,
+                timeout: 30,
+            },
+            matrix: MatrixConfig {
+                homeserver: "https://example.org".to_string(),
+                user_id: "@bot:example.org".to_string(),
+                device_name: "chimney-post".to_string(),
+                room_id: "!room:example.org".to_string(),
+                store_path: "/tmp/matrix".to_string(),
+                require_e2ee: true,
+                message_template: "{{ unclosed".to_string(),
+                credentials: MatrixCredentials {
+                    password: Some("test".to_string()),
+                    access_token: None,
+                    device_id: None,
+                },
+            },
+            logging: LoggingConfig {
+                level: "info".to_string(),
+                format: "json".to_string(),
+            },
+            queue: QueueConfig {
+                max_retries: 5,
+                retry_backoff: 60,
+                capacity: 10,
+            },
+        };
+
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("template"));
     }
 }

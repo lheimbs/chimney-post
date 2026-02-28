@@ -344,6 +344,7 @@ name = "chimney-post"
 version = "0.1.0"
 dependencies = [
  "matrix-sdk",
+ "minijinja",
  "serde",
  "thiserror 2.0.18",
  "tokio",
@@ -2013,6 +2014,15 @@ name = "mime2ext"
 version = "0.1.54"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cbf6f36070878c42c5233846cd3de24cf9016828fd47bc22957a687298bb21fc"
+
+[[package]]
+name = "minijinja"
+version = "2.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c54f3bcc034dd74496b5ca929fd0b710186672d5ff0b0f255a9ceb259042ece"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "miniz_oxide"

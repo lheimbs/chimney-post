@@ -21,6 +21,31 @@ store_path = "/var/lib/chimney-post/matrix-store"
 # Set to false only if you intentionally use a non-E2EE room.
 # require_e2ee = true
 
+# MiniJinja template for formatting messages sent to Matrix.
+# Available variables: from, to, subject, body
+# All variables are strings; from and subject are empty when not present in
+# the email, so use {% if from %} to conditionally include them.
+# If omitted, the built-in default template is used (shows From/To/Subject
+# headers followed by the body).
+# See https://docs.rs/minijinja for full template syntax.
+#
+# Example – compact format showing only subject and body:
+#   message_template = "[{{ subject }}] {{ body }}"
+#
+# Default template (for reference):
+# message_template = """
+# {%- if from %}From: {{ from }}
+# {% endif -%}
+# {%- if to %}To: {{ to }}
+# {% endif -%}
+# {%- if subject %}Subject: {{ subject }}{% else %}Subject: (none){% endif %}
+#
+# {%- if body and body is string and body | trim %}
+# {{ body }}
+# {%- else %}
+# (empty message body)
+# {%- endif %}"""
+
 [matrix.credentials]
 # Password (prefer environment variable)
 password = "${MATRIX_PASSWORD}"

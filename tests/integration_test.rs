@@ -1,5 +1,6 @@
 use chimney_post::config::{
     Config, LoggingConfig, MatrixConfig, MatrixCredentials, QueueConfig, SmtpConfig,
+    DEFAULT_MESSAGE_TEMPLATE,
 };
 use chimney_post::queue::MessageQueue;
 use chimney_post::smtp::start_smtp_server;
@@ -21,6 +22,7 @@ fn test_config(bind: &str, max_message_size: usize) -> Config {
             room_id: "!room:example.org".to_string(),
             store_path: "/tmp/matrix".to_string(),
             require_e2ee: true,
+            message_template: DEFAULT_MESSAGE_TEMPLATE.to_string(),
             credentials: MatrixCredentials {
                 password: Some("test".to_string()),
                 access_token: None,

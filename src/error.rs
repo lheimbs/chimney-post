@@ -16,6 +16,9 @@ pub enum ChimneyError {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    #[error("Template error: {0}")]
+    Template(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

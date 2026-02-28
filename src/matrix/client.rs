@@ -17,6 +17,7 @@ pub struct MatrixClient {
     room_id: OwnedRoomId,
     user_id: OwnedUserId,
     require_e2ee: bool,
+    message_template: String,
 }
 
 impl MatrixClient {
@@ -166,11 +167,12 @@ impl MatrixClient {
             room_id,
             user_id,
             require_e2ee: config.matrix.require_e2ee,
+            message_template: config.matrix.message_template.clone(),
         })
     }
 
     pub async fn send_message(&self, message: &Message) -> Result<()> {
-        let formatted = format_message(message);
+        let formatted = format_message(message, &self.message_template)?;
 
         let room = match self.client.get_room(&self.room_id) {
             Some(room) => room,
