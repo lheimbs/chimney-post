@@ -1,0 +1,13 @@
+[Unit]
+Description=Chimney Post SMTP to Matrix Forwarder
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/chimney-post
+Restart=on-failure
+RestartSec=5
+Environment=CHIMNEY_CONFIG=/etc/chimney-post/config.toml
+
+[Install]
+WantedBy=multi-user.target

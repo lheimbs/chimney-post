@@ -1,0 +1,19 @@
+[package]
+name = "chimney-post"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Local-only SMTP server forwarding email to Matrix with E2EE"
+rust-version = "1.74"
+
+[dependencies]
+tokio = { version = "1.49.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time", "io-util"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.9.8"
+thiserror = "2.0.18"
+matrix-sdk = { version = "0.16.0", features = ["e2e-encryption", "sqlite"] }
+url = "2.5.7"
+
+[dev-dependencies]

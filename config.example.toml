@@ -1,0 +1,41 @@
+[smtp]
+# Bind address (must be local)
+bind = "127.0.0.1:2525"
+# Maximum message size in bytes
+max_message_size = 10485760  # 10MB
+# Connection timeout in seconds
+timeout = 30
+
+[matrix]
+# Homeserver URL
+homeserver = "https://matrix.org"
+# User ID (@user:server.com)
+user_id = "@bot:example.com"
+# Device display name
+device_name = "chimney-post"
+# Room ID to send messages to
+room_id = "!roomid:example.com"
+# Store path for E2EE keys (secure this!)
+store_path = "/var/lib/chimney-post/matrix-store"
+
+[matrix.credentials]
+# Password (prefer environment variable)
+password = "${MATRIX_PASSWORD}"
+# Or use access token
+# access_token = "${MATRIX_ACCESS_TOKEN}"
+# Required with access_token
+# device_id = "${MATRIX_DEVICE_ID}"
+
+[logging]
+# Trace, Debug, Info, Warn, Error
+level = "info"
+# Log format: json or pretty
+format = "json"
+
+[queue]
+# Maximum retry attempts
+max_retries = 5
+# Retry backoff in seconds
+retry_backoff = 60
+# In-memory queue capacity
+capacity = 100
