@@ -15,12 +15,6 @@ pub async fn start_smtp_server(config: Arc<Config>, queue: MessageQueue) -> Resu
             ChimneyError::Config("smtp.bind must be a valid SocketAddr".to_string())
         })?;
 
-    if !bind_addr.ip().is_loopback() {
-        return Err(ChimneyError::Config(
-            "smtp.bind must be a loopback address".to_string(),
-        ));
-    }
-
     let listener = TcpListener::bind(bind_addr).await?;
     info!(bind = %bind_addr, "SMTP server listening");
 
@@ -32,11 +26,6 @@ pub async fn start_smtp_server(config: Arc<Config>, queue: MessageQueue) -> Resu
                 continue;
             }
         };
-        if !remote_addr.ip().is_loopback() {
-            warn!(remote = %remote_addr, "Rejected non-local SMTP connection");
-            continue;
-        }
-
         let queue_clone = queue.clone();
         let config_clone = Arc::clone(&config);
         tokio::spawn(async move {

@@ -103,15 +103,9 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        let addr: SocketAddr = self.smtp.bind.parse().map_err(|_| {
-            ChimneyError::Config("smtp.bind must be an IP:PORT on localhost".to_string())
+        let _addr: SocketAddr = self.smtp.bind.parse().map_err(|_| {
+            ChimneyError::Config("smtp.bind must be a valid IP:PORT address".to_string())
         })?;
-
-        if !addr.ip().is_loopback() {
-            return Err(ChimneyError::Config(
-                "smtp.bind must be a loopback address".to_string(),
-            ));
-        }
 
         if self.smtp.max_message_size == 0 {
             return Err(ChimneyError::Config(
@@ -254,43 +248,6 @@ fn is_blank(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn validate_rejects_non_loopback() {
-        let config = Config {
-            smtp: SmtpConfig {
-                bind: "0.0.0.0:2525".to_string(),
-                max_message_size: 1024,
-                timeout: 30,
-            },
-            matrix: MatrixConfig {
-                homeserver: "https://example.org".to_string(),
-                user_id: "@bot:example.org".to_string(),
-                device_name: "chimney-post".to_string(),
-                room_id: "!room:example.org".to_string(),
-                store_path: "/tmp/matrix".to_string(),
-                require_e2ee: true,
-                message_template: default_message_template(),
-                credentials: MatrixCredentials {
-                    password: None,
-                    access_token: None,
-                    device_id: None,
-                },
-            },
-            logging: LoggingConfig {
-                level: "info".to_string(),
-                format: "json".to_string(),
-            },
-            queue: QueueConfig {
-                max_retries: 5,
-                retry_backoff: 60,
-                capacity: 10,
-            },
-        };
-
-        let result = config.validate();
-        assert!(result.is_err());
-    }
 
     #[test]
     fn validate_rejects_invalid_template() {

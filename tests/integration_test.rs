@@ -80,12 +80,6 @@ async fn start_test_server(
 }
 
 #[test]
-fn config_requires_loopback_bind() {
-    let config = test_config("0.0.0.0:2525", 1024);
-    assert!(config.validate().is_err());
-}
-
-#[test]
 fn config_rejects_both_credentials() {
     let mut config = test_config("127.0.0.1:2525", 1024);
     config.matrix.credentials.password = Some("pass".to_string());
