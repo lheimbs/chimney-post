@@ -6,6 +6,7 @@ use chimney_post::smtp::start_smtp_server;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal;
+use tokio::signal::unix::{signal as unix_signal, SignalKind};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -57,6 +58,8 @@ async fn main() -> Result<()> {
 
     let smtp_task = tokio::spawn(start_smtp_server(Arc::clone(&config), queue));
 
+    let mut sigterm = unix_signal(SignalKind::terminate())?;
+
     tokio::select! {
         result = smtp_task => {
             match result {
@@ -82,7 +85,10 @@ async fn main() -> Result<()> {
             }
         }
         _ = signal::ctrl_c() => {
-            info!("Shutdown signal received");
+            info!("Shutdown signal received (SIGINT)");
+        }
+        _ = sigterm.recv() => {
+            info!("Shutdown signal received (SIGTERM)");
         }
     }
 
