@@ -24,8 +24,14 @@ impl MatrixClient {
             ChimneyError::Config(format!("invalid matrix.homeserver URL: {error}"))
         })?;
 
+        // Create store directory before the builder needs it
+        std::fs::create_dir_all(&config.matrix.store_path).map_err(|error| {
+            ChimneyError::Matrix(format!("failed to create store directory: {error}"))
+        })?;
+
         let client = Client::builder()
             .homeserver_url(homeserver_url)
+            .sqlite_store(&config.matrix.store_path, None)
             .build()
             .await
             .map_err(|error| {
@@ -88,11 +94,6 @@ impl MatrixClient {
             ));
         }
 
-        // Create store directory if it doesn't exist
-        std::fs::create_dir_all(&config.matrix.store_path).map_err(|error| {
-            ChimneyError::Matrix(format!("failed to create store directory: {error}"))
-        })?;
-
         // Perform initial sync to load encryption keys
         client
             .sync_once(SyncSettings::default())
@@ -110,11 +111,6 @@ impl MatrixClient {
 
     pub async fn send_message(&self, message: &Message) -> Result<()> {
         let formatted = format_message(message);
-        if formatted.trim().is_empty() {
-            return Err(ChimneyError::Matrix(
-                "formatted Matrix message is empty".to_string(),
-            ));
-        }
 
         let room = match self.client.get_room(&self.room_id) {
             Some(room) => room,

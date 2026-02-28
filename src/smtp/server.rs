@@ -25,7 +25,13 @@ pub async fn start_smtp_server(config: Arc<Config>, queue: MessageQueue) -> Resu
     info!(bind = %bind_addr, "SMTP server listening");
 
     loop {
-        let (stream, remote_addr) = listener.accept().await?;
+        let (stream, remote_addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(error) => {
+                warn!(error = %error, "Failed to accept SMTP connection");
+                continue;
+            }
+        };
         if !remote_addr.ip().is_loopback() {
             warn!(remote = %remote_addr, "Rejected non-local SMTP connection");
             continue;
@@ -85,35 +91,33 @@ async fn handle_connection(
         }
 
         let upper = line.to_uppercase();
-        if upper.starts_with("QUIT") {
+        let cmd = upper.split_whitespace().next().unwrap_or("");
+        if cmd == "QUIT" {
             writer.write_all(b"221 Bye\r\n").await?;
             break;
-        } else if upper.starts_with("HELO") || upper.starts_with("EHLO") {
+        } else if cmd == "HELO" {
             writer.write_all(b"250 chimney-post\r\n").await?;
-        } else if upper.starts_with("RSET") {
+        } else if cmd == "EHLO" {
+            let ehlo_response = format!(
+                "250-chimney-post\r\n250 SIZE {}\r\n",
+                config.smtp.max_message_size
+            );
+            writer.write_all(ehlo_response.as_bytes()).await?;
+        } else if cmd == "RSET" {
             from = None;
             recipients.clear();
             writer.write_all(b"250 OK\r\n").await?;
-        } else if upper.starts_with("NOOP") {
+        } else if cmd == "NOOP" {
             writer.write_all(b"250 OK\r\n").await?;
-        } else if upper.starts_with("MAIL FROM:") {
-            from = Some(
-                line[10..]
-                    .trim()
-                    .trim_matches('<')
-                    .trim_matches('>')
-                    .to_string(),
-            );
+        } else if upper.starts_with("MAIL FROM") {
+            let addr = extract_address_after_colon(line).unwrap_or_default();
+            from = Some(addr);
             writer.write_all(b"250 OK\r\n").await?;
-        } else if upper.starts_with("RCPT TO:") {
-            let recipient = line[8..]
-                .trim()
-                .trim_matches('<')
-                .trim_matches('>')
-                .to_string();
-            recipients.push(recipient);
+        } else if upper.starts_with("RCPT TO") {
+            let addr = extract_address_after_colon(line).unwrap_or_default();
+            recipients.push(addr);
             writer.write_all(b"250 OK\r\n").await?;
-        } else if upper.starts_with("DATA") {
+        } else if cmd == "DATA" {
             if from.is_none() || recipients.is_empty() {
                 writer
                     .write_all(b"503 Bad sequence of commands\r\n")
@@ -128,14 +132,24 @@ async fn handle_connection(
                 config.smtp.max_message_size,
                 config.smtp.timeout,
             )
-            .await?;
+            .await;
+            let data = match data {
+                Ok(data) => data,
+                Err(ChimneyError::SmtpSizeExceeded) => {
+                    writer.write_all(b"552 Message size exceeded\r\n").await?;
+                    from = None;
+                    recipients.clear();
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let message = parse_data(from.clone(), recipients.clone(), &data);
             queue.send(message).await?;
             writer.write_all(b"250 OK\r\n").await?;
             from = None;
             recipients.clear();
         } else {
-            writer.write_all(b"250 OK\r\n").await?;
+            writer.write_all(b"502 Command not implemented\r\n").await?;
         }
     }
 
@@ -174,13 +188,25 @@ async fn read_data(
         }
 
         if data.len() + line.len() > max_size {
-            return Err(ChimneyError::Smtp(
-                "SMTP data exceeded max size".to_string(),
-            ));
+            return Err(ChimneyError::SmtpSizeExceeded);
         }
 
         data.push_str(&line);
     }
 
     Ok(data)
+}
+
+/// Extract the email address from after the colon in MAIL FROM: / RCPT TO: commands.
+/// Handles optional whitespace around the colon (e.g. `MAIL FROM:<a>`, `MAIL FROM: <a>`,
+/// `MAIL FROM :<a>`).
+fn extract_address_after_colon(line: &str) -> Option<String> {
+    let colon_pos = line.find(':')?;
+    Some(
+        line[colon_pos + 1..]
+            .trim()
+            .trim_matches('<')
+            .trim_matches('>')
+            .to_string(),
+    )
 }

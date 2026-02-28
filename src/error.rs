@@ -7,6 +7,9 @@ pub enum ChimneyError {
     #[error("SMTP error: {0}")]
     Smtp(String),
 
+    #[error("SMTP message size exceeded")]
+    SmtpSizeExceeded,
+
     #[error("Matrix error: {0}")]
     Matrix(String),
 

@@ -9,5 +9,14 @@ Restart=on-failure
 RestartSec=5
 Environment=CHIMNEY_CONFIG=/etc/chimney-post/config.toml
 
+DynamicUser=yes
+StateDirectory=chimney-post
+ProtectSystem=strict
+ReadWritePaths=/var/lib/chimney-post
+ProtectHome=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
 [Install]
 WantedBy=multi-user.target

@@ -17,3 +17,4 @@ matrix-sdk = { version = "0.16.0", features = ["e2e-encryption", "sqlite"] }
 url = "2.5.7"
 
 [dev-dependencies]
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "io-util", "net"] }

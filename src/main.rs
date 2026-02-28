@@ -39,7 +39,9 @@ async fn main() -> Result<()> {
                         }
 
                         attempt += 1;
-                        let backoff_seconds = retry_backoff.saturating_mul(attempt as u64);
+                        let backoff_seconds = retry_backoff
+                            .saturating_mul(2u64.saturating_pow(attempt - 1))
+                            .min(900);
                         warn!(
                             error = %error,
                             attempt,
@@ -57,8 +59,26 @@ async fn main() -> Result<()> {
 
     tokio::select! {
         result = smtp_task => {
-            if let Err(error) = result {
-                return Err(ChimneyError::Smtp(format!("SMTP task failed: {error}")));
+            match result {
+                Err(join_error) => {
+                    return Err(ChimneyError::Smtp(format!("SMTP task panicked: {join_error}")));
+                }
+                Ok(Err(smtp_error)) => {
+                    return Err(smtp_error);
+                }
+                Ok(Ok(())) => {
+                    error!("SMTP server exited unexpectedly");
+                }
+            }
+        }
+        result = matrix_task => {
+            match result {
+                Err(join_error) => {
+                    return Err(ChimneyError::Matrix(format!("Matrix task panicked: {join_error}")));
+                }
+                Ok(()) => {
+                    error!("Matrix delivery worker exited unexpectedly");
+                }
             }
         }
         _ = signal::ctrl_c() => {
@@ -66,7 +86,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    matrix_task.abort();
     Ok(())
 }
 

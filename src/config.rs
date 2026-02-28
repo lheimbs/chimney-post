@@ -30,11 +30,24 @@ pub struct MatrixConfig {
     pub credentials: MatrixCredentials,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct MatrixCredentials {
     pub password: Option<String>,
     pub access_token: Option<String>,
     pub device_id: Option<String>,
+}
+
+impl std::fmt::Debug for MatrixCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MatrixCredentials")
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "access_token",
+                &self.access_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("device_id", &self.device_id)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -59,7 +72,7 @@ impl Config {
     pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = fs::read_to_string(&path)?;
         let mut config: Self = toml::from_str(&content)?;
-        config.apply_env_overrides();
+        config.apply_env_overrides()?;
         config.validate()?;
         Ok(config)
     }
@@ -119,6 +132,14 @@ impl Config {
             ));
         }
 
+        if self.matrix.credentials.password.is_some()
+            && self.matrix.credentials.access_token.is_some()
+        {
+            return Err(ChimneyError::Config(
+                "matrix credentials must use either password or access_token, not both".to_string(),
+            ));
+        }
+
         if let Some(access_token) = self.matrix.credentials.access_token.as_deref() {
             if access_token.trim().is_empty() {
                 return Err(ChimneyError::Config(
@@ -142,17 +163,33 @@ impl Config {
         Ok(())
     }
 
-    fn apply_env_overrides(&mut self) {
+    fn apply_env_overrides(&mut self) -> Result<()> {
         if self.matrix.credentials.password.as_deref() == Some("${MATRIX_PASSWORD}") {
-            self.matrix.credentials.password = env::var("MATRIX_PASSWORD").ok();
+            self.matrix.credentials.password = Some(env::var("MATRIX_PASSWORD").map_err(|_| {
+                ChimneyError::Config(
+                    "config references ${MATRIX_PASSWORD} but the env var is not set".to_string(),
+                )
+            })?);
         }
 
         if self.matrix.credentials.access_token.as_deref() == Some("${MATRIX_ACCESS_TOKEN}") {
-            self.matrix.credentials.access_token = env::var("MATRIX_ACCESS_TOKEN").ok();
+            self.matrix.credentials.access_token =
+                Some(env::var("MATRIX_ACCESS_TOKEN").map_err(|_| {
+                    ChimneyError::Config(
+                        "config references ${MATRIX_ACCESS_TOKEN} but the env var is not set"
+                            .to_string(),
+                    )
+                })?);
         }
 
         if self.matrix.credentials.device_id.as_deref() == Some("${MATRIX_DEVICE_ID}") {
-            self.matrix.credentials.device_id = env::var("MATRIX_DEVICE_ID").ok();
+            self.matrix.credentials.device_id =
+                Some(env::var("MATRIX_DEVICE_ID").map_err(|_| {
+                    ChimneyError::Config(
+                        "config references ${MATRIX_DEVICE_ID} but the env var is not set"
+                            .to_string(),
+                    )
+                })?);
         }
 
         if self.matrix.credentials.password.is_none() {
@@ -172,6 +209,8 @@ impl Config {
                 self.matrix.credentials.device_id = Some(value);
             }
         }
+
+        Ok(())
     }
 }
 

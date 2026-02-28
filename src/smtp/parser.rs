@@ -40,10 +40,8 @@ fn extract_subject_and_body(data: &str) -> (Option<String>, String) {
 
             if name == "subject" {
                 subject = Some(value.to_string());
-                last_header = Some("subject".to_string());
-            } else {
-                last_header = None;
             }
+            last_header = Some(name);
         } else {
             body_lines.push(line);
         }
