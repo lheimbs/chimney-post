@@ -28,7 +28,8 @@ impl MatrixClient {
 
         // Create store directory before the builder needs it
         std::fs::create_dir_all(&config.matrix.store_path).map_err(|error| {
-            ChimneyError::Matrix(format!("failed to create store directory: {error}"))
+            let path = &config.matrix.store_path;
+            ChimneyError::Matrix(format!("failed to create store directory {path}: {error}"))
         })?;
 
         let mut client = Client::builder()

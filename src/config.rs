@@ -95,8 +95,13 @@ impl Config {
     }
 
     pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content = fs::read_to_string(&path)?;
-        let mut config: Self = toml::from_str(&content)?;
+        let path = path.as_ref();
+        let content = fs::read_to_string(path).map_err(|e| {
+            ChimneyError::Config(format!("{}: {e}", path.display()))
+        })?;
+        let mut config: Self = toml::from_str(&content).map_err(|e| {
+            ChimneyError::Config(format!("{}: {e}", path.display()))
+        })?;
         config.apply_env_overrides()?;
         config.validate()?;
         Ok(config)
