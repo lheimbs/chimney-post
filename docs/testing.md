@@ -1,6 +1,8 @@
 # Testing Guide
 
-This guide covers end-to-end, integration, and unit testing for chimney-post. It is written for the current codebase and matrix-sdk 0.16.0. Follow each section in order for full coverage.
+This guide covers end-to-end, integration, and unit testing for chimney-post.
+It is written for the current codebase and matrix-sdk 0.16.0.
+Follow each section in order for full coverage.
 
 ## Prerequisites
 

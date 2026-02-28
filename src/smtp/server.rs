@@ -109,14 +109,28 @@ async fn handle_connection(
             writer.write_all(b"250 OK\r\n").await?;
         } else if cmd == "NOOP" {
             writer.write_all(b"250 OK\r\n").await?;
-        } else if upper.starts_with("MAIL FROM") {
-            let addr = extract_address_after_colon(line).unwrap_or_default();
-            from = Some(addr);
-            writer.write_all(b"250 OK\r\n").await?;
-        } else if upper.starts_with("RCPT TO") {
-            let addr = extract_address_after_colon(line).unwrap_or_default();
-            recipients.push(addr);
-            writer.write_all(b"250 OK\r\n").await?;
+        } else if cmd == "MAIL" {
+            match parse_mail_from(line) {
+                Some(addr) => {
+                    from = Some(addr);
+                    writer.write_all(b"250 OK\r\n").await?;
+                }
+                None => {
+                    writer
+                        .write_all(b"501 Syntax error in MAIL FROM\r\n")
+                        .await?;
+                }
+            }
+        } else if cmd == "RCPT" {
+            match parse_rcpt_to(line) {
+                Some(addr) => {
+                    recipients.push(addr);
+                    writer.write_all(b"250 OK\r\n").await?;
+                }
+                None => {
+                    writer.write_all(b"501 Syntax error in RCPT TO\r\n").await?;
+                }
+            }
         } else if cmd == "DATA" {
             if from.is_none() || recipients.is_empty() {
                 writer
@@ -197,9 +211,37 @@ async fn read_data(
     Ok(data)
 }
 
+/// Validate `MAIL FROM:` syntax and extract the sender address.
+/// Returns `Some(address)` for valid commands, `None` for malformed syntax.
+/// An empty address (from `MAIL FROM:<>`) is valid per RFC 5321 (null sender for bounces).
+fn parse_mail_from(line: &str) -> Option<String> {
+    let upper = line.to_uppercase();
+    let rest = upper.strip_prefix("MAIL")?.trim_start();
+    let rest = rest.strip_prefix("FROM")?.trim_start();
+    if !rest.starts_with(':') {
+        return None;
+    }
+    extract_address_after_colon(line)
+}
+
+/// Validate `RCPT TO:` syntax and extract the recipient address.
+/// Returns `Some(address)` for valid commands with a non-empty recipient,
+/// `None` for malformed syntax or empty addresses.
+fn parse_rcpt_to(line: &str) -> Option<String> {
+    let upper = line.to_uppercase();
+    let rest = upper.strip_prefix("RCPT")?.trim_start();
+    let rest = rest.strip_prefix("TO")?.trim_start();
+    if !rest.starts_with(':') {
+        return None;
+    }
+    let addr = extract_address_after_colon(line)?;
+    if addr.is_empty() {
+        return None;
+    }
+    Some(addr)
+}
+
 /// Extract the email address from after the colon in MAIL FROM: / RCPT TO: commands.
-/// Handles optional whitespace around the colon (e.g. `MAIL FROM:<a>`, `MAIL FROM: <a>`,
-/// `MAIL FROM :<a>`).
 fn extract_address_after_colon(line: &str) -> Option<String> {
     let colon_pos = line.find(':')?;
     Some(

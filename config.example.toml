@@ -17,6 +17,9 @@ device_name = "chimney-post"
 room_id = "!roomid:example.com"
 # Store path for E2EE keys (secure this!)
 store_path = "/var/lib/chimney-post/matrix-store"
+# Require the room to be encrypted before sending (default: true).
+# Set to false only if you intentionally use a non-E2EE room.
+# require_e2ee = true
 
 [matrix.credentials]
 # Password (prefer environment variable)

@@ -20,6 +20,7 @@ fn test_config(bind: &str, max_message_size: usize) -> Config {
             device_name: "chimney-post".to_string(),
             room_id: "!room:example.org".to_string(),
             store_path: "/tmp/matrix".to_string(),
+            require_e2ee: true,
             credentials: MatrixCredentials {
                 password: Some("test".to_string()),
                 access_token: None,
@@ -214,6 +215,83 @@ async fn smtp_returns_502_on_unknown_command() {
     writer.write_all(b"BOGUSCOMMAND arg\r\n").await.unwrap();
     let resp = read_response(&mut reader).await;
     assert!(resp.starts_with("502"), "Expected 502, got: {resp}");
+
+    writer.write_all(b"QUIT\r\n").await.unwrap();
+    read_response(&mut reader).await;
+
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn smtp_rejects_malformed_mail_from() {
+    let (bind, _queue, server_handle) = start_test_server(test_config("127.0.0.1:0", 10240)).await;
+
+    let stream = TcpStream::connect(&bind).await.unwrap();
+    let (read_half, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+
+    read_response(&mut reader).await; // greeting
+
+    // "MAIL FROMAGE" should not be accepted as MAIL FROM
+    writer
+        .write_all(b"MAIL FROMAGE:<a@b.com>\r\n")
+        .await
+        .unwrap();
+    let resp = read_response(&mut reader).await;
+    assert!(
+        resp.starts_with("501") || resp.starts_with("502"),
+        "Expected 501 or 502, got: {resp}"
+    );
+
+    // Missing colon
+    writer.write_all(b"MAIL FROM <a@b.com>\r\n").await.unwrap();
+    let resp = read_response(&mut reader).await;
+    assert!(resp.starts_with("501"), "Expected 501, got: {resp}");
+
+    writer.write_all(b"QUIT\r\n").await.unwrap();
+    read_response(&mut reader).await;
+
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn smtp_rejects_empty_rcpt_to() {
+    let (bind, _queue, server_handle) = start_test_server(test_config("127.0.0.1:0", 10240)).await;
+
+    let stream = TcpStream::connect(&bind).await.unwrap();
+    let (read_half, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+
+    read_response(&mut reader).await; // greeting
+
+    writer.write_all(b"MAIL FROM:<a@b.com>\r\n").await.unwrap();
+    read_response(&mut reader).await;
+
+    // Empty recipient should be rejected
+    writer.write_all(b"RCPT TO:<>\r\n").await.unwrap();
+    let resp = read_response(&mut reader).await;
+    assert!(resp.starts_with("501"), "Expected 501, got: {resp}");
+
+    writer.write_all(b"QUIT\r\n").await.unwrap();
+    read_response(&mut reader).await;
+
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn smtp_accepts_null_sender() {
+    let (bind, _queue, server_handle) = start_test_server(test_config("127.0.0.1:0", 10240)).await;
+
+    let stream = TcpStream::connect(&bind).await.unwrap();
+    let (read_half, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+
+    read_response(&mut reader).await; // greeting
+
+    // Null sender (bounce message) is valid per RFC 5321
+    writer.write_all(b"MAIL FROM:<>\r\n").await.unwrap();
+    let resp = read_response(&mut reader).await;
+    assert!(resp.starts_with("250"), "Expected 250, got: {resp}");
 
     writer.write_all(b"QUIT\r\n").await.unwrap();
     read_response(&mut reader).await;

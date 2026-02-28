@@ -9,13 +9,14 @@ use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId};
 use matrix_sdk::Client;
 use matrix_sdk::SessionMeta;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Clone)]
 pub struct MatrixClient {
     client: Client,
     room_id: OwnedRoomId,
     user_id: OwnedUserId,
+    require_e2ee: bool,
 }
 
 impl MatrixClient {
@@ -106,6 +107,7 @@ impl MatrixClient {
             client,
             room_id,
             user_id,
+            require_e2ee: config.matrix.require_e2ee,
         })
     }
 
@@ -127,6 +129,29 @@ impl MatrixClient {
                     .ok_or_else(|| ChimneyError::Matrix("Matrix room not found".to_string()))?
             }
         };
+
+        // Check room encryption state
+        let mut encryption_state = room.encryption_state();
+        if encryption_state.is_unknown() {
+            room.request_encryption_state().await.map_err(|error| {
+                ChimneyError::Matrix(format!("failed to query room encryption state: {error}"))
+            })?;
+            encryption_state = room.encryption_state();
+        }
+
+        if !encryption_state.is_encrypted() {
+            if self.require_e2ee {
+                return Err(ChimneyError::Matrix(
+                    "room is not encrypted and matrix.require_e2ee is enabled; \
+                     refusing to send unencrypted message"
+                        .to_string(),
+                ));
+            }
+            warn!(
+                room_id = %self.room_id,
+                "sending message to unencrypted room (matrix.require_e2ee = false)"
+            );
+        }
 
         let content = RoomMessageEventContent::text_plain(formatted);
 

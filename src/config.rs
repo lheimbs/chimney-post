@@ -27,7 +27,13 @@ pub struct MatrixConfig {
     pub device_name: String,
     pub room_id: String,
     pub store_path: String,
+    #[serde(default = "default_require_e2ee")]
+    pub require_e2ee: bool,
     pub credentials: MatrixCredentials,
+}
+
+fn default_require_e2ee() -> bool {
+    true
 }
 
 #[derive(Clone, Deserialize)]
@@ -236,6 +242,7 @@ mod tests {
                 device_name: "chimney-post".to_string(),
                 room_id: "!room:example.org".to_string(),
                 store_path: "/tmp/matrix".to_string(),
+                require_e2ee: true,
                 credentials: MatrixCredentials {
                     password: None,
                     access_token: None,
