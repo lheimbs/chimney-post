@@ -1,23 +1,227 @@
-# Chimney Post
+<p align="center">
+  <img src="chimney-post_banner.png" alt="Chimney Post -- emails enter a chimney and emerge as encrypted Matrix messages" width="800">
+</p>
 
-Local-only SMTP server that forwards incoming email to Matrix with end-to-end encryption.
+<h1 align="center">Chimney Post</h1>
 
-:warning: Created with AI! Do not use in Prod! :warning:
+<p align="center">
+  A local-only SMTP server that forwards incoming email to Matrix with end-to-end encryption.
+</p>
 
-## Status
+<p align="center">
+  <a href="https://github.com/lheimbs/chimney-post/actions/workflows/ci.yml"><img src="https://github.com/lheimbs/chimney-post/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/lheimbs/chimney-post/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/rust-1.74%2B-orange" alt="Minimum Rust version: 1.74">
+</p>
 
-Prototype in progress.
+---
 
-## Quick Start
+**Warning**: This project was created with AI assistance and is in an early prototype stage. Use at your own risk.
 
-1. Copy the example config:
-   - `cp config.example.toml config.toml`
-2. Set Matrix credentials via environment variables.
-3. Run the service:
-   - `cargo run`
+---
 
-## Security
+## About
 
-- Binds to localhost only.
-- Matrix messages must be end-to-end encrypted.
-- Store Matrix credentials in environment variables, not in config files.
+Chimney Post sits on your local machine, accepts emails over SMTP, and delivers them as end-to-end encrypted messages to a Matrix room. It is designed for forwarding automated notifications on your server - be it nextcloud, rkhunter for rootkit hunting or apticron for automated upgrades - into one encrypted Matrix chat.
+
+The SMTP server binds exclusively to `127.0.0.1`, so it never accepts connections from the network. Matrix messages are encrypted by default using the `matrix-sdk` E2EE implementation, and the encryption store is persisted locally in SQLite so device keys survive restarts.
+
+This is essentially a super narrow version of [mailrise](https://github.com/YoRyan/mailrise) but intended for a single server and its services and only forwarding to matrix.
+
+## Features
+
+- **Local SMTP server** -- Listens on localhost only; never exposed to the network.
+- **End-to-end encrypted Matrix delivery** -- All messages are sent through E2EE. Optionally enforce that the target room is encrypted before sending.
+- **Password or access-token authentication** -- Connect to any Matrix homeserver with either method.
+- **Configurable message templates** -- Format forwarded emails with MiniJinja templates (subject, body, sender, recipient are all available as variables).
+- **Retry with exponential backoff** -- Failed Matrix deliveries are retried automatically (configurable attempts and interval).
+- **Async, low-resource** -- Built on Tokio; idles at minimal CPU and memory.
+- **Structured logging** -- JSON or human-readable log output via `tracing`.
+- **systemd-ready** -- Ships with a hardened service unit file.
+- **Graceful shutdown** -- Handles SIGINT and SIGTERM cleanly.
+
+## How It Works
+
+```txt
+ Service / Script                Chimney Post                 Matrix Homeserver
+ ──────────────────     ─────────────────────────────     ────────────────────────
+  sends email  ───────> SMTP server (127.0.0.1:2525)
+                        parses headers & body
+                        queues message (in-memory) ─────> Matrix client sends
+                                                          E2EE message to room
+                        on failure: retry with backoff
+```
+
+1. An application connects to the SMTP server on localhost and sends an email (standard SMTP commands: EHLO, MAIL FROM, RCPT TO, DATA).
+2. Chimney Post parses the email headers (From, To, Subject) and body.
+3. The message is placed on an in-memory async queue.
+4. A background task picks up queued messages, formats them through the configured MiniJinja template, and sends them as encrypted Matrix messages.
+5. If delivery fails, the message is re-queued with exponential backoff up to the configured retry limit.
+
+## Getting Started
+
+### Prerequisites
+
+- Rust 1.74 or later (install via [rustup](https://rustup.rs/))
+- A Matrix account for the bot
+- A Matrix room where the bot should post (invite the bot user to the room)
+
+### Build
+
+```bash
+git clone https://github.com/lheimbs/chimney-post.git
+cd chimney-post
+cargo build --release
+```
+
+The binary is written to `target/release/chimney-post`.
+
+### Configure
+
+Copy the example configuration and edit it:
+
+```bash
+cp config.example.toml config.toml
+```
+
+At minimum, fill in the `[matrix]` section with your homeserver URL, bot user ID, and target room ID. Provide credentials through environment variables:
+
+```bash
+# Password-based authentication
+export MATRIX_PASSWORD="your-matrix-password"
+
+# -- or -- access-token authentication
+export MATRIX_ACCESS_TOKEN="syt_..."
+export MATRIX_DEVICE_ID="ABCDEFGHIJ"
+```
+
+The config file references these variables with `${MATRIX_PASSWORD}` syntax; Chimney Post substitutes them at startup.
+
+### Run
+
+```bash
+# Uses config.toml in the current directory by default
+cargo run --release
+
+# Or point to a specific config file
+CHIMNEY_CONFIG=/etc/chimney-post/config.toml ./target/release/chimney-post
+```
+
+## Configuration Reference
+
+All settings live in a single TOML file. See `config.example.toml` for a fully annotated copy.
+
+### `[smtp]`
+
+| Key                | Default          | Description                                                               |
+|--------------------|------------------|---------------------------------------------------------------------------|
+| `bind`             | `127.0.0.1:2525` | Address and port the SMTP server listens on. Must be a localhost address. |
+| `max_message_size` | `10485760`       | Maximum email size in bytes (10 MB).                                      |
+| `timeout`          | `30`             | Connection timeout in seconds.                                            |
+
+### `[matrix]`
+
+| Key                | Default          | Description                                        |
+|--------------------|------------------|----------------------------------------------------|
+| `homeserver`       | --               | Matrix homeserver URL (e.g. `https://matrix.org`). |
+| `user_id`          | --               | Full Matrix user ID (`@user:server.com`).          |
+| `device_name`      | `chimney-post`   | Display name for the Matrix device.                |
+| `room_id`          | --               | Target room ID (`!room:server.com`).               |
+| `store_path`       | --               | Directory for the E2EE key store (SQLite).         |
+| `require_e2ee`     | `true`           | Refuse to send if the room is not encrypted.       |
+| `message_template` | *(built-in)*     | MiniJinja template for formatting messages.        |
+
+### `[matrix.credentials]`
+
+Provide **either** the password **or** the access_token + device_id pair:
+
+| Key             | Description                                                     |
+|-----------------|-----------------------------------------------------------------|
+| `password`      | Matrix password (use `${MATRIX_PASSWORD}`).                     |
+| `access_token`  | Matrix access token (use `${MATRIX_ACCESS_TOKEN}`).             |
+| `device_id`     | Required when using `access_token` (use `${MATRIX_DEVICE_ID}`). |
+
+### `[logging]`
+
+| Key      | Default | Description                                               |
+|----------|---------|-----------------------------------------------------------|
+| `level`  | `info`  | Log verbosity: `trace`, `debug`, `info`, `warn`, `error`. |
+| `format` | `json`  | Output format: `json` or `pretty`.                        |
+
+### `[queue]`
+
+| Key             | Default | Description                                            |
+|-----------------|---------|--------------------------------------------------------|
+| `max_retries`   | `5`     | Maximum delivery attempts per message.                 |
+| `retry_backoff` | `60`    | Base backoff interval in seconds (doubles each retry). |
+| `capacity`      | `100`   | Maximum number of messages held in the queue.          |
+
+## Message Templates
+
+Chimney Post formats each email using a [MiniJinja](https://docs.rs/minijinja) template before sending it to Matrix. Four variables are available: `from`, `to`, `subject`, and `body` (all strings).
+
+The built-in default template renders a full email view:
+
+```jinja
+{%- if from %}From: {{ from }}
+{% endif -%}
+{%- if to %}To: {{ to }}
+{% endif -%}
+{%- if subject %}Subject: {{ subject }}{% else %}Subject: (none){% endif %}
+
+{%- if body and body is string and body | trim %}
+{{ body }}
+{%- else %}
+(empty message body)
+{%- endif %}
+```
+
+Override it in `config.toml` to use a custom format:
+
+```toml
+[matrix]
+message_template = "[{{ subject }}] {{ body }}"
+```
+
+## Running as a systemd Service
+
+A service unit file is included at `systemd/chimney-post.service`. To install:
+
+```bash
+# Copy the binary
+sudo cp target/release/chimney-post /usr/local/bin/
+
+# Create the config directory and copy your config
+sudo mkdir -p /etc/chimney-post
+sudo cp config.toml /etc/chimney-post/config.toml
+sudo chmod 600 /etc/chimney-post/config.toml
+
+# Install the service unit
+sudo cp systemd/chimney-post.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now chimney-post
+```
+
+The service unit runs with `DynamicUser=yes` and strict filesystem protections (read-only root, private `/tmp`, no new privileges). State data (E2EE key store) is kept under `/var/lib/chimney-post`.
+
+Set secrets in a systemd environment file or drop-in override:
+
+```bash
+sudo systemctl edit chimney-post
+```
+
+```ini
+[Service]
+Environment=MATRIX_PASSWORD=your-secret
+```
+
+## Development
+
+### Build and Test
+
+```bash
+cargo fmt --check    # Check formatting
+cargo clippy         # Lint (warnings treated as errors in CI)
+cargo test           # Run unit and integration tests
+cargo build          # Debug build
+```
