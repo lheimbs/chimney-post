@@ -198,24 +198,6 @@ impl Config {
                 })?);
         }
 
-        if self.matrix.credentials.password.is_none() {
-            if let Ok(value) = env::var("MATRIX_PASSWORD") {
-                self.matrix.credentials.password = Some(value);
-            }
-        }
-
-        if self.matrix.credentials.access_token.is_none() {
-            if let Ok(value) = env::var("MATRIX_ACCESS_TOKEN") {
-                self.matrix.credentials.access_token = Some(value);
-            }
-        }
-
-        if self.matrix.credentials.device_id.is_none() {
-            if let Ok(value) = env::var("MATRIX_DEVICE_ID") {
-                self.matrix.credentials.device_id = Some(value);
-            }
-        }
-
         Ok(())
     }
 }

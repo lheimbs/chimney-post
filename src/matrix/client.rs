@@ -30,8 +30,8 @@ impl MatrixClient {
             ChimneyError::Matrix(format!("failed to create store directory: {error}"))
         })?;
 
-        let client = Client::builder()
-            .homeserver_url(homeserver_url)
+        let mut client = Client::builder()
+            .homeserver_url(homeserver_url.clone())
             .sqlite_store(&config.matrix.store_path, None)
             .build()
             .await
@@ -72,9 +72,39 @@ impl MatrixClient {
                 },
             };
 
-            client.restore_session(session).await.map_err(|error| {
-                ChimneyError::Matrix(format!("Matrix access token login failed: {error}"))
-            })?;
+            if let Err(error) = client.restore_session(session.clone()).await {
+                let msg = error.to_string();
+                if msg.contains("doesn't match") {
+                    warn!(
+                        "crypto store has keys for a different device; \
+                         clearing store and retrying"
+                    );
+                    drop(client);
+                    std::fs::remove_dir_all(&config.matrix.store_path).map_err(|error| {
+                        ChimneyError::Matrix(format!("failed to clear store: {error}"))
+                    })?;
+                    std::fs::create_dir_all(&config.matrix.store_path).map_err(|error| {
+                        ChimneyError::Matrix(format!("failed to recreate store directory: {error}"))
+                    })?;
+                    client = Client::builder()
+                        .homeserver_url(homeserver_url.clone())
+                        .sqlite_store(&config.matrix.store_path, None)
+                        .build()
+                        .await
+                        .map_err(|error| {
+                            ChimneyError::Matrix(format!("Matrix client rebuild failed: {error}"))
+                        })?;
+                    client.restore_session(session).await.map_err(|error| {
+                        ChimneyError::Matrix(format!(
+                            "Matrix access token login failed after store reset: {error}"
+                        ))
+                    })?;
+                } else {
+                    return Err(ChimneyError::Matrix(format!(
+                        "Matrix access token login failed: {error}"
+                    )));
+                }
+            }
         } else if let Some(password) = config.matrix.credentials.password.as_deref() {
             let auth = client.matrix_auth();
             let mut login_builder = auth
@@ -85,10 +115,16 @@ impl MatrixClient {
                 login_builder = login_builder.device_id(device_id);
             }
 
-            login_builder
+            let response = login_builder
                 .send()
                 .await
                 .map_err(|error| ChimneyError::Matrix(format!("Matrix login failed: {error}")))?;
+
+            info!(
+                device_id = %response.device_id,
+                "password login successful; use this device_id in config \
+                 when switching to access_token auth"
+            );
         } else {
             return Err(ChimneyError::Config(
                 "matrix credentials require password or access_token".to_string(),
@@ -102,6 +138,28 @@ impl MatrixClient {
             .map_err(|error| {
                 ChimneyError::Matrix(format!("Matrix initial sync failed: {error}"))
             })?;
+
+        // Bootstrap cross-signing if not already set up so the bot's
+        // device appears as verified to other users.  Some homeservers
+        // (e.g. matrix.org) require interactive auth (OAuth) for this
+        // operation, so treat failure as non-fatal.
+        let needs_bootstrap = match client.encryption().cross_signing_status().await {
+            Some(status) => !status.is_complete(),
+            None => true,
+        };
+        if needs_bootstrap {
+            info!("cross-signing not set up, attempting bootstrap");
+            match client.encryption().bootstrap_cross_signing(None).await {
+                Ok(()) => info!("cross-signing bootstrap complete"),
+                Err(error) => warn!(
+                    %error,
+                    "cross-signing bootstrap failed (homeserver may require interactive auth); \
+                     verify the bot device manually from another client"
+                ),
+            }
+        } else {
+            info!("cross-signing already set up");
+        }
 
         Ok(Self {
             client,
