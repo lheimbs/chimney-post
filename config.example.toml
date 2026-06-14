@@ -51,8 +51,12 @@ store_path = "/var/lib/chimney-post/matrix-store"
 password = "${MATRIX_PASSWORD}"
 # Or use access token
 # access_token = "${MATRIX_ACCESS_TOKEN}"
-# Required with access_token
-# device_id = "${MATRIX_DEVICE_ID}"
+# Device ID. REQUIRED with access_token, and STRONGLY RECOMMENDED with password
+# auth: pinning a stable device_id makes every login reuse the same Matrix
+# device. Without it, a password login creates a brand-new device on every
+# start -- orphaning devices on your account and forcing a crypto-store reset
+# each restart. Pick any stable string (e.g. "chimney-post").
+device_id = "chimney-post"
 
 [logging]
 # Trace, Debug, Info, Warn, Error

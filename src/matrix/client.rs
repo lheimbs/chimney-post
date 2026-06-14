@@ -156,6 +156,15 @@ impl MatrixClient {
                 }
             }
         } else if let Some(password) = config.matrix.credentials.password.as_deref() {
+            if config.matrix.credentials.device_id.is_none() {
+                warn!(
+                    "password auth without matrix.credentials.device_id: the homeserver \
+                     issues a NEW device on every start, which orphans devices on your \
+                     account and forces a crypto-store reset each restart. Set a stable \
+                     device_id to reuse one device across restarts."
+                );
+            }
+
             let do_password_login = |client: &Client| {
                 let auth = client.matrix_auth();
                 let mut login_builder = auth

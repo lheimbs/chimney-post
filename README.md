@@ -137,11 +137,20 @@ All settings live in a single TOML file. See `config.example.toml` for a fully a
 
 Provide **either** the password **or** the access_token + device_id pair:
 
-| Key             | Description                                                     |
-|-----------------|-----------------------------------------------------------------|
-| `password`      | Matrix password (use `${MATRIX_PASSWORD}`).                     |
-| `access_token`  | Matrix access token (use `${MATRIX_ACCESS_TOKEN}`).             |
-| `device_id`     | Required when using `access_token` (use `${MATRIX_DEVICE_ID}`). |
+| Key             | Description                                                                          |
+|-----------------|-------------------------------------------------------------------------------------|
+| `password`      | Matrix password (use `${MATRIX_PASSWORD}`).                                          |
+| `access_token`  | Matrix access token (use `${MATRIX_ACCESS_TOKEN}`).                                  |
+| `device_id`     | Required with `access_token`; **strongly recommended with `password`** (see below).  |
+
+> **Pin `device_id` for password auth.** A password login with no `device_id`
+> makes the homeserver mint a **new Matrix device on every start**. Because the
+> local E2EE crypto store is bound to a single device, the next restart
+> mismatches it — orphaning devices on your account and forcing a crypto-store
+> reset each time. Set a stable `device_id` (any string, e.g. `chimney-post`) so
+> every login reuses the same device. (Switching to `access_token` + `device_id`
+> avoids re-logging in entirely and is the preferred setup for an unattended
+> bot — see `docs/session-persistence.md` for a fully self-managing alternative.)
 
 ### `[logging]`
 
