@@ -24,4 +24,10 @@ pub enum ChimneyError {
 
     #[error("TOML error: {0}")]
     Toml(#[from] toml::de::Error),
+
+    #[error("Queue error: {0}")]
+    Queue(String),
+
+    #[error("Storage error: {0}")]
+    Storage(#[from] rusqlite::Error),
 }

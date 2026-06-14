@@ -85,7 +85,13 @@ pub struct LoggingConfig {
 pub struct QueueConfig {
     pub max_retries: u32,
     pub retry_backoff: u64,
-    pub capacity: usize,
+    /// Path to the persistent SQLite outbox database.
+    #[serde(default = "default_queue_db_path")]
+    pub db_path: String,
+}
+
+fn default_queue_db_path() -> String {
+    "/var/lib/chimney-post/queue.db".to_string()
 }
 
 impl Config {
@@ -116,9 +122,9 @@ impl Config {
             ));
         }
 
-        if self.queue.capacity == 0 {
+        if is_blank(&self.queue.db_path) {
             return Err(ChimneyError::Config(
-                "queue.capacity must be greater than zero".to_string(),
+                "queue.db_path must not be empty".to_string(),
             ));
         }
 
@@ -281,7 +287,7 @@ mod tests {
             queue: QueueConfig {
                 max_retries: 5,
                 retry_backoff: 60,
-                capacity: 10,
+                db_path: "/tmp/queue.db".to_string(),
             },
         };
 

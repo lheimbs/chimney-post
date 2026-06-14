@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::error::{ChimneyError, Result};
 use crate::matrix::format_message;
-use crate::queue::Message;
+use crate::queue::{DeliveryFuture, Message, MessageSink};
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::authentication::SessionTokens;
 use matrix_sdk::config::SyncSettings;
@@ -279,5 +279,11 @@ impl MatrixClient {
         );
 
         Ok(())
+    }
+}
+
+impl MessageSink for MatrixClient {
+    fn deliver<'a>(&'a self, message: &'a Message) -> DeliveryFuture<'a> {
+        Box::pin(self.send_message(message))
     }
 }

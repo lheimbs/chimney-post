@@ -34,7 +34,8 @@ This is essentially a super narrow version of [mailrise](https://github.com/YoRy
 - **End-to-end encrypted Matrix delivery** -- All messages are sent through E2EE. Optionally enforce that the target room is encrypted before sending.
 - **Password or access-token authentication** -- Connect to any Matrix homeserver with either method.
 - **Configurable message templates** -- Format forwarded emails with MiniJinja templates (subject, body, sender, recipient are all available as variables).
-- **Retry with exponential backoff** -- Failed Matrix deliveries are retried automatically (configurable attempts and interval).
+- **Durable, persistent queue** -- Accepted emails are written to a local SQLite outbox *before* the SMTP `250 OK` and only removed once delivered, so messages survive restarts and crashes.
+- **Retry with exponential backoff** -- Failed Matrix deliveries are retried automatically (configurable attempts and interval). A single failing message backs off independently and never blocks delivery of the rest of the queue.
 - **Async, low-resource** -- Built on Tokio; idles at minimal CPU and memory.
 - **Structured logging** -- JSON or human-readable log output via `tracing`.
 - **systemd-ready** -- Ships with a hardened service unit file.
@@ -47,16 +48,17 @@ This is essentially a super narrow version of [mailrise](https://github.com/YoRy
  ──────────────────     ─────────────────────────────     ────────────────────────
   sends email  ───────> SMTP server (127.0.0.1:2525)
                         parses headers & body
-                        queues message (in-memory) ─────> Matrix client sends
-                                                          E2EE message to room
-                        on failure: retry with backoff
+                        persists to SQLite outbox ──────> Matrix client sends
+                        (then acks 250 OK)                E2EE message to room
+                        on success: delete from outbox
+                        on failure: reschedule w/ backoff
 ```
 
 1. An application connects to the SMTP server on localhost and sends an email (standard SMTP commands: EHLO, MAIL FROM, RCPT TO, DATA).
 2. Chimney Post parses the email headers (From, To, Subject) and body.
-3. The message is placed on an in-memory async queue.
-4. A background task picks up queued messages, formats them through the configured MiniJinja template, and sends them as encrypted Matrix messages.
-5. If delivery fails, the message is re-queued with exponential backoff up to the configured retry limit.
+3. The message is written to a persistent SQLite outbox. Only after it is durably stored does the server reply `250 OK` (a storage failure yields `451` so the sender retries).
+4. A background worker picks up the earliest *due* message, formats it through the configured MiniJinja template, and sends it as an encrypted Matrix message. On success the message is deleted from the outbox.
+5. If delivery fails, the message is rescheduled with exponential backoff up to the configured retry limit; the worker moves on to the next due message so one failure never blocks the queue. Messages still pending are retained across restarts and retried on the next start.
 
 ## Getting Started
 
@@ -150,11 +152,11 @@ Provide **either** the password **or** the access_token + device_id pair:
 
 ### `[queue]`
 
-| Key             | Default | Description                                            |
-|-----------------|---------|--------------------------------------------------------|
-| `max_retries`   | `5`     | Maximum delivery attempts per message.                 |
-| `retry_backoff` | `60`    | Base backoff interval in seconds (doubles each retry). |
-| `capacity`      | `100`   | Maximum number of messages held in the queue.          |
+| Key             | Default                          | Description                                                              |
+|-----------------|----------------------------------|--------------------------------------------------------------------------|
+| `max_retries`   | `5`                              | Maximum retries after the initial attempt before a message is dropped.   |
+| `retry_backoff` | `60`                             | Base backoff interval in seconds (doubles each retry, capped at 900s).   |
+| `db_path`       | `/var/lib/chimney-post/queue.db` | Path to the persistent SQLite outbox; must be writable by the service.   |
 
 ## Message Templates
 

@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::error::{ChimneyError, Result};
-use crate::queue::MessageQueue;
+use crate::queue::MessageStore;
 use crate::smtp::parser::parse_data;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{timeout, Duration};
 use tracing::{info, warn};
 
-pub async fn start_smtp_server(config: Arc<Config>, queue: MessageQueue) -> Result<()> {
+pub async fn start_smtp_server(config: Arc<Config>, store: MessageStore) -> Result<()> {
     let bind_addr: SocketAddr =
         config.smtp.bind.parse().map_err(|_| {
             ChimneyError::Config("smtp.bind must be a valid SocketAddr".to_string())
@@ -26,11 +26,11 @@ pub async fn start_smtp_server(config: Arc<Config>, queue: MessageQueue) -> Resu
                 continue;
             }
         };
-        let queue_clone = queue.clone();
+        let store_clone = store.clone();
         let config_clone = Arc::clone(&config);
         tokio::spawn(async move {
             if let Err(error) =
-                handle_connection(stream, remote_addr, config_clone, queue_clone).await
+                handle_connection(stream, remote_addr, config_clone, store_clone).await
             {
                 warn!(error = %error, "SMTP connection failed");
             }
@@ -42,7 +42,7 @@ async fn handle_connection(
     stream: TcpStream,
     remote_addr: SocketAddr,
     config: Arc<Config>,
-    queue: MessageQueue,
+    store: MessageStore,
 ) -> Result<()> {
     info!(remote = %remote_addr, "SMTP connection opened");
 
@@ -147,8 +147,20 @@ async fn handle_connection(
                 Err(error) => return Err(error),
             };
             let message = parse_data(from.clone(), recipients.clone(), &data);
-            queue.send(message).await?;
-            writer.write_all(b"250 OK\r\n").await?;
+            // Persist before acknowledging: only return 250 once the message is
+            // durably queued, so an accepted email is never silently lost. On a
+            // storage failure, return 451 so the sender retries instead.
+            match store.enqueue(&message).await {
+                Ok(_) => {
+                    writer.write_all(b"250 OK\r\n").await?;
+                }
+                Err(error) => {
+                    warn!(error = %error, "failed to persist message; rejecting with 451");
+                    writer
+                        .write_all(b"451 Requested action aborted: local error in processing\r\n")
+                        .await?;
+                }
+            }
             from = None;
             recipients.clear();
         } else {

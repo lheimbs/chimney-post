@@ -1,15 +1,19 @@
 use chimney_post::config::Config;
 use chimney_post::error::{ChimneyError, Result};
 use chimney_post::matrix::MatrixClient;
-use chimney_post::queue::MessageQueue;
+use chimney_post::queue::{DeliveryWorker, MessageStore};
 use chimney_post::smtp::start_smtp_server;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal;
 use tokio::signal::unix::{signal as unix_signal, SignalKind};
-use tokio::time::sleep;
-use tracing::{error, info, warn};
+use tokio::sync::watch;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+
+/// How long to wait for the delivery worker to drain ready messages on
+/// shutdown before giving up. Undelivered messages remain persisted regardless.
+const SHUTDOWN_DRAIN_SECONDS: u64 = 30;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -17,79 +21,55 @@ async fn main() -> Result<()> {
     init_tracing(&config)?;
 
     let config = Arc::new(config);
-    let (queue, mut receiver) = MessageQueue::new(config.queue.capacity);
+
+    let store = MessageStore::open(&config.queue.db_path).await?;
     let matrix = MatrixClient::connect(config.as_ref()).await?;
-    let max_retries = config.queue.max_retries;
-    let retry_backoff = config.queue.retry_backoff;
 
-    let matrix_task = tokio::spawn(async move {
-        while let Some(message) = receiver.recv().await {
-            let mut attempt = 0u32;
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-            loop {
-                match matrix.send_message(&message).await {
-                    Ok(()) => break,
-                    Err(error) => {
-                        if attempt >= max_retries {
-                            error!(
-                                error = %error,
-                                attempts = attempt + 1,
-                                "Matrix send failed after retries"
-                            );
-                            break;
-                        }
-
-                        attempt += 1;
-                        let backoff_seconds = retry_backoff
-                            .saturating_mul(2u64.saturating_pow(attempt - 1))
-                            .min(900);
-                        warn!(
-                            error = %error,
-                            attempt,
-                            backoff_seconds,
-                            "Matrix send failed, backing off"
-                        );
-                        sleep(Duration::from_secs(backoff_seconds)).await;
-                    }
-                }
-            }
-        }
-    });
-
-    let smtp_task = tokio::spawn(start_smtp_server(Arc::clone(&config), queue));
+    let worker = DeliveryWorker::new(
+        store.clone(),
+        matrix,
+        config.queue.max_retries,
+        config.queue.retry_backoff,
+    );
+    let mut worker_handle = tokio::spawn(worker.run(shutdown_rx));
+    let mut smtp_handle = tokio::spawn(start_smtp_server(Arc::clone(&config), store.clone()));
 
     let mut sigterm = unix_signal(SignalKind::terminate())?;
 
     tokio::select! {
-        result = smtp_task => {
-            match result {
-                Err(join_error) => {
-                    return Err(ChimneyError::Smtp(format!("SMTP task panicked: {join_error}")));
-                }
-                Ok(Err(smtp_error)) => {
-                    return Err(smtp_error);
-                }
-                Ok(Ok(())) => {
-                    error!("SMTP server exited unexpectedly");
-                }
-            }
+        result = &mut smtp_handle => {
+            // The SMTP server loops forever; any return is unexpected.
+            return match result {
+                Err(join_error) => Err(ChimneyError::Smtp(format!("SMTP task panicked: {join_error}"))),
+                Ok(Err(smtp_error)) => Err(smtp_error),
+                Ok(Ok(())) => Err(ChimneyError::Smtp("SMTP server exited unexpectedly".to_string())),
+            };
         }
-        result = matrix_task => {
-            match result {
-                Err(join_error) => {
-                    return Err(ChimneyError::Matrix(format!("Matrix task panicked: {join_error}")));
-                }
-                Ok(()) => {
-                    error!("Matrix delivery worker exited unexpectedly");
-                }
-            }
+        result = &mut worker_handle => {
+            return match result {
+                Err(join_error) => Err(ChimneyError::Matrix(format!("delivery worker panicked: {join_error}"))),
+                Ok(()) => Err(ChimneyError::Matrix("delivery worker exited unexpectedly".to_string())),
+            };
         }
-        _ = signal::ctrl_c() => {
-            info!("Shutdown signal received (SIGINT)");
-        }
-        _ = sigterm.recv() => {
-            info!("Shutdown signal received (SIGTERM)");
-        }
+        _ = signal::ctrl_c() => info!("Shutdown signal received (SIGINT)"),
+        _ = sigterm.recv() => info!("Shutdown signal received (SIGTERM)"),
+    }
+
+    // Graceful shutdown: stop accepting mail, then let the worker drain the
+    // messages that are currently due. Anything still backing off stays in the
+    // persistent queue and is retried on the next start.
+    info!("draining delivery queue before exit");
+    smtp_handle.abort();
+    let _ = shutdown_tx.send(true);
+
+    match tokio::time::timeout(Duration::from_secs(SHUTDOWN_DRAIN_SECONDS), worker_handle).await {
+        Ok(Ok(())) => info!("delivery queue drained; exiting"),
+        Ok(Err(join_error)) => warn!(%join_error, "delivery worker join error during shutdown"),
+        Err(_) => warn!(
+            "timed out draining delivery queue; undelivered messages remain persisted for retry"
+        ),
     }
 
     Ok(())

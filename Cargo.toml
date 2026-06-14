@@ -16,9 +16,11 @@ thiserror = "2.0.18"
 matrix-sdk = { version = "0.16.0", features = ["e2e-encryption", "sqlite"] }
 url = "2.5.7"
 minijinja = "2"
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [dev-dependencies]
-tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "io-util", "net"] }
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "io-util", "net", "time"] }
+tempfile = "3"
 
 [profile.release]
 lto = true

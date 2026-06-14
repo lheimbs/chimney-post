@@ -2,11 +2,19 @@ use chimney_post::config::{
     Config, LoggingConfig, MatrixConfig, MatrixCredentials, QueueConfig, SmtpConfig,
     DEFAULT_MESSAGE_TEMPLATE,
 };
-use chimney_post::queue::MessageQueue;
+use chimney_post::queue::MessageStore;
 use chimney_post::smtp::start_smtp_server;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
 
 fn test_config(bind: &str, max_message_size: usize) -> Config {
     Config {
@@ -36,7 +44,7 @@ fn test_config(bind: &str, max_message_size: usize) -> Config {
         queue: QueueConfig {
             max_retries: 5,
             retry_backoff: 60,
-            capacity: 10,
+            db_path: ":memory:".to_string(),
         },
     }
 }
@@ -56,12 +64,13 @@ async fn read_response(reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -
     response
 }
 
-/// Spin up the SMTP server on a random port, return the bind address and server handle.
+/// Spin up the SMTP server on a random port, return the bind address, the
+/// backing store, and the server handle.
 async fn start_test_server(
     config: Config,
 ) -> (
     String,
-    MessageQueue,
+    MessageStore,
     tokio::task::JoinHandle<chimney_post::error::Result<()>>,
 ) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -72,11 +81,10 @@ async fn start_test_server(
     let mut config = config;
     config.smtp.bind = bind.clone();
     let config = Arc::new(config);
-    let (queue, _receiver) = MessageQueue::new(config.queue.capacity);
-    let queue_clone = queue.clone();
-    let handle = tokio::spawn(start_smtp_server(config, queue_clone));
+    let store = MessageStore::open(":memory:").await.unwrap();
+    let handle = tokio::spawn(start_smtp_server(config, store.clone()));
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    (bind, queue, handle)
+    (bind, store, handle)
 }
 
 #[test]
@@ -91,19 +99,7 @@ fn config_rejects_both_credentials() {
 
 #[tokio::test]
 async fn smtp_full_session_delivers_message() {
-    let base_config = test_config("127.0.0.1:0", 10240);
-    let config = Arc::new(base_config.clone());
-    let (queue, mut receiver) = MessageQueue::new(config.queue.capacity);
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-
-    let bind = format!("127.0.0.1:{port}");
-    let mut test_cfg = base_config;
-    test_cfg.smtp.bind = bind.clone();
-    let server_handle = tokio::spawn(start_smtp_server(Arc::new(test_cfg), queue));
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let (bind, store, server_handle) = start_test_server(test_config("127.0.0.1:0", 10240)).await;
 
     let stream = TcpStream::connect(&bind).await.unwrap();
     let (read_half, mut writer) = stream.into_split();
@@ -153,8 +149,13 @@ async fn smtp_full_session_delivers_message() {
     let resp = read_response(&mut reader).await;
     assert!(resp.starts_with("221"));
 
-    // Verify message in queue
-    let message = receiver.recv().await.unwrap();
+    // Verify the message was durably persisted to the outbox.
+    let stored = store
+        .claim_next_ready(now_secs())
+        .await
+        .unwrap()
+        .expect("message should be persisted in the queue");
+    let message = stored.message;
     assert_eq!(message.from.as_deref(), Some("sender@example.com"));
     assert_eq!(message.to, vec!["recipient@example.com"]);
     assert_eq!(message.subject.as_deref(), Some("Test"));

@@ -63,7 +63,9 @@ format = "json"
 [queue]
 # Maximum retry attempts
 max_retries = 5
-# Retry backoff in seconds
+# Retry backoff in seconds (exponential; capped at 900s)
 retry_backoff = 60
-# In-memory queue capacity
-capacity = 100
+# Path to the persistent SQLite outbox. Accepted emails are written here before
+# being acknowledged and only removed once delivered to Matrix, so messages
+# survive restarts and crashes. Must be writable by the service user.
+db_path = "/var/lib/chimney-post/queue.db"
