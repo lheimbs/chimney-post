@@ -33,18 +33,36 @@ async fn build_client(homeserver_url: &url::Url, store_path: &str) -> Result<Cli
 }
 
 /// True if `error` is the crypto-store device/account mismatch, i.e. the store
-/// holds keys for a different device than the one we are configured to use.
+/// holds keys for a different device than the one we are configured to use
+/// (`CryptoStoreError::MismatchedAccount`).
 ///
-/// Matched structurally (`CryptoStoreError::MismatchedAccount`) rather than by
-/// message substring: many unrelated crypto errors also contain "doesn't
-/// match", and a structural match breaks at compile time if the SDK changes
-/// instead of silently misfiring.
+/// The login/restore call wraps this deep inside other errors (the surfaced
+/// message looks like "failed to read or write to the crypto store the account
+/// in the store doesn't match the account in the constructor: ..."), so a
+/// `matches!` on the top-level `matrix_sdk::Error` variant misses it. We walk
+/// the error's `source()` chain and downcast to the concrete crypto-store
+/// error; as a safety net we also match the distinctive message text, which the
+/// wrappers include in their own `Display` output.
 fn is_mismatched_account(error: &matrix_sdk::Error) -> bool {
-    matches!(
-        error,
-        matrix_sdk::Error::CryptoStoreError(inner)
-            if matches!(inner.as_ref(), CryptoStoreError::MismatchedAccount { .. })
-    )
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(err) = source {
+        if let Some(CryptoStoreError::MismatchedAccount { .. }) =
+            err.downcast_ref::<CryptoStoreError>()
+        {
+            return true;
+        }
+        source = err.source();
+    }
+
+    message_indicates_mismatch(&error.to_string())
+}
+
+/// Matches the distinctive text of `CryptoStoreError::MismatchedAccount`. This
+/// is far more specific than "doesn't match", which also appears in unrelated
+/// crypto errors (sender, public-key, and room-id mismatches) that must not
+/// trigger a crypto-store wipe.
+fn message_indicates_mismatch(message: &str) -> bool {
+    message.contains("doesn't match the account in the constructor")
 }
 
 /// Delete only the crypto-store database (plus its SQLite WAL/SHM sidecars) so
@@ -285,5 +303,32 @@ impl MatrixClient {
 impl MessageSink for MatrixClient {
     fn deliver<'a>(&'a self, message: &'a Message) -> DeliveryFuture<'a> {
         Box::pin(self.send_message(message))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::message_indicates_mismatch;
+
+    #[test]
+    fn detects_wrapped_account_mismatch() {
+        // The exact shape surfaced by a password login against a store holding
+        // keys for a different device.
+        let message = "failed to read or write to the crypto store the account in \
+             the store doesn't match the account in the constructor: \
+             expected @user:matrix.org:CQIY3fUCQw, got @user:matrix.org:N44C4nQOfa";
+        assert!(message_indicates_mismatch(message));
+    }
+
+    #[test]
+    fn ignores_unrelated_doesnt_match_errors() {
+        // Other crypto errors contain "doesn't match" but must never trigger a
+        // crypto-store wipe.
+        assert!(!message_indicates_mismatch(
+            "the public key that was part of the message doesn't match the key we have"
+        ));
+        assert!(!message_indicates_mismatch(
+            "the room id of the room key doesn't match the room id of the decrypted event"
+        ));
     }
 }
