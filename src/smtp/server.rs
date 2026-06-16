@@ -209,18 +209,23 @@ async fn handle_connection(
     Ok(())
 }
 
-/// Read one `\n`-terminated line into `buf` as UTF-8, consuming at most
-/// `max_bytes` bytes from `reader`. Returns the number of bytes read (0 = EOF).
+/// Read one `\n`-terminated line into `buf` (raw bytes), consuming at most
+/// `max_bytes` bytes from `reader`. Returns the number of bytes appended
+/// (0 = EOF).
 ///
 /// Returns [`ChimneyError::SmtpLineTooLong`] if the line would exceed
 /// `max_bytes`, bounding per-line memory regardless of how the client behaves
 /// (e.g. a never-ending line with no newline). Reading is done over `fill_buf`
 /// so the cap is enforced incrementally, before the whole line is buffered.
-async fn read_line_limited<R>(reader: &mut R, buf: &mut String, max_bytes: usize) -> Result<usize>
+async fn read_line_limited_bytes<R>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max_bytes: usize,
+) -> Result<usize>
 where
     R: AsyncBufRead + Unpin,
 {
-    let mut raw: Vec<u8> = Vec::new();
+    let start = buf.len();
     loop {
         let available = reader.fill_buf().await?;
         if available.is_empty() {
@@ -230,27 +235,37 @@ where
         match available.iter().position(|&b| b == b'\n') {
             Some(idx) => {
                 let take = idx + 1;
-                if raw.len() + take > max_bytes {
+                if buf.len() - start + take > max_bytes {
                     return Err(ChimneyError::SmtpLineTooLong);
                 }
-                raw.extend_from_slice(&available[..take]);
+                buf.extend_from_slice(&available[..take]);
                 reader.consume(take);
                 break;
             }
             None => {
                 let take = available.len();
-                if raw.len() + take > max_bytes {
+                if buf.len() - start + take > max_bytes {
                     return Err(ChimneyError::SmtpLineTooLong);
                 }
-                raw.extend_from_slice(available);
+                buf.extend_from_slice(available);
                 reader.consume(take);
             }
         }
     }
 
-    let bytes = raw.len();
+    Ok(buf.len() - start)
+}
+
+/// Like [`read_line_limited_bytes`] but decodes the line as UTF-8. Used for SMTP
+/// commands, which are ASCII; an invalid byte is an error.
+async fn read_line_limited<R>(reader: &mut R, buf: &mut String, max_bytes: usize) -> Result<usize>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut raw: Vec<u8> = Vec::new();
+    let bytes = read_line_limited_bytes(reader, &mut raw, max_bytes).await?;
     let text = String::from_utf8(raw)
-        .map_err(|_| ChimneyError::Smtp("invalid UTF-8 in SMTP line".to_string()))?;
+        .map_err(|_| ChimneyError::Smtp("invalid UTF-8 in SMTP command".to_string()))?;
     buf.push_str(&text);
     Ok(bytes)
 }
@@ -259,16 +274,18 @@ async fn read_data<R>(reader: &mut R, max_size: usize, timeout_seconds: u64) -> 
 where
     R: AsyncBufRead + Unpin,
 {
-    let mut data = String::new();
+    // DATA is read as raw bytes so 8-bit / non-UTF-8 message bodies are accepted
+    // (decoded lossily at the end) rather than killing the connection.
+    let mut data: Vec<u8> = Vec::new();
     loop {
-        let mut line = String::new();
+        let mut line: Vec<u8> = Vec::new();
         // Bound each line read to the remaining size budget (plus a little slack
         // for the terminator / dot-unstuffing) so peak memory stays ~max_size
         // even if a client never sends a newline.
         let remaining = max_size.saturating_sub(data.len()).saturating_add(4);
         let read_result = timeout(
             Duration::from_secs(timeout_seconds),
-            read_line_limited(reader, &mut line, remaining),
+            read_line_limited_bytes(reader, &mut line, remaining),
         )
         .await;
         let bytes = match read_result {
@@ -285,22 +302,23 @@ where
             return Err(ChimneyError::SmtpDataIncomplete);
         }
 
-        if line == ".\r\n" || line == ".\n" {
+        if matches!(line.as_slice(), b".\r\n" | b".\n") {
             break;
         }
 
-        if let Some(stripped) = line.strip_prefix("..") {
-            line = format!(".{stripped}");
+        // Dot-unstuffing: a data line that began with ".." has one leading dot.
+        if line.starts_with(b"..") {
+            line.remove(0);
         }
 
         if data.len() + line.len() > max_size {
             return Err(ChimneyError::SmtpSizeExceeded);
         }
 
-        data.push_str(&line);
+        data.extend_from_slice(&line);
     }
 
-    Ok(data)
+    Ok(String::from_utf8_lossy(&data).into_owned())
 }
 
 /// Validate `MAIL FROM:` syntax and extract the sender address.
@@ -398,6 +416,19 @@ mod tests {
     async fn read_data_enforces_the_size_limit() {
         let err = read_data_str(b"123456789\r\n.\r\n", 8).await.unwrap_err();
         assert!(matches!(err, ChimneyError::SmtpSizeExceeded));
+    }
+
+    #[tokio::test]
+    async fn read_data_preserves_8bit_body_lossily() {
+        // 0xE9 is 'é' in Latin-1, which is invalid UTF-8; it must not abort the
+        // read but be decoded lossily so the message still gets forwarded.
+        let data = read_data_str(b"caf\xe9 time\r\n.\r\n", 1024).await.unwrap();
+        assert!(data.contains("caf"));
+        assert!(data.contains("time"));
+        assert!(
+            data.contains('\u{FFFD}'),
+            "invalid byte should become the replacement char: {data:?}"
+        );
     }
 
     /// Read a single line from `data`, using a BufReader with the given internal
