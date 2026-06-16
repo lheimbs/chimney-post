@@ -37,6 +37,17 @@ CREATE TABLE IF NOT EXISTS outbox (
     created_at      INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_ready ON outbox(next_attempt_at, id);
+CREATE TABLE IF NOT EXISTS dead_letter (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_addr       TEXT,
+    to_addrs        TEXT NOT NULL,
+    subject         TEXT,
+    body            TEXT NOT NULL,
+    attempts        INTEGER NOT NULL,
+    created_at      INTEGER NOT NULL,
+    failed_at       INTEGER NOT NULL,
+    last_error      TEXT NOT NULL
+);
 ";
 
 /// A durable, SQLite-backed message outbox.
@@ -157,9 +168,35 @@ impl MessageStore {
         self.remove(id).await
     }
 
-    /// Remove a message that has exhausted its retries and is being dropped.
-    pub async fn discard(&self, id: i64) -> Result<()> {
-        self.remove(id).await
+    /// Move a message that has exhausted its retries out of the active outbox
+    /// into the `dead_letter` table (recording the last error), so a permanently
+    /// undeliverable alert is retained for inspection rather than lost. Both
+    /// statements run under the same connection lock.
+    pub async fn dead_letter(&self, id: i64, last_error: &str) -> Result<()> {
+        let last_error = last_error.to_string();
+        let failed_at = unix_now();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO dead_letter
+                     (from_addr, to_addrs, subject, body, attempts, created_at, failed_at, last_error)
+                 SELECT from_addr, to_addrs, subject, body, attempts, created_at, ?2, ?3
+                 FROM outbox WHERE id = ?1",
+                params![id, failed_at, last_error],
+            )?;
+            conn.execute("DELETE FROM outbox WHERE id = ?1", params![id])?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Number of messages in the dead-letter table.
+    pub async fn dead_letter_len(&self) -> Result<usize> {
+        self.with_conn(|conn| {
+            let count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM dead_letter", [], |row| row.get(0))?;
+            Ok(count as usize)
+        })
+        .await
     }
 
     async fn remove(&self, id: i64) -> Result<()> {
@@ -425,6 +462,21 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(store.len().await.unwrap(), 50);
+    }
+
+    #[tokio::test]
+    async fn dead_letter_moves_message_out_of_the_outbox() {
+        let store = MessageStore::open_in_memory().await.unwrap();
+        let id = store.enqueue(&msg("doomed", &["x@x.com"])).await.unwrap();
+        assert_eq!(store.len().await.unwrap(), 1);
+        assert_eq!(store.dead_letter_len().await.unwrap(), 0);
+
+        store.dead_letter(id, "permanent failure").await.unwrap();
+
+        assert_eq!(store.len().await.unwrap(), 0);
+        assert_eq!(store.dead_letter_len().await.unwrap(), 1);
+        // It is no longer deliverable from the active queue.
+        assert!(store.claim_next_ready(unix_now()).await.unwrap().is_none());
     }
 
     #[tokio::test]

@@ -139,10 +139,10 @@ impl<S: MessageSink> DeliveryWorker<S> {
                 id, attempts, %error,
                 from = ?stored.message.from,
                 subject = ?stored.message.subject,
-                "giving up on message after exhausting retries; dropping it"
+                "giving up on message after exhausting retries; moving to dead-letter"
             );
-            if let Err(error) = self.store.discard(id).await {
-                error!(id, %error, "failed to discard exhausted message");
+            if let Err(dead_letter_error) = self.store.dead_letter(id, &error.to_string()).await {
+                error!(id, error = %dead_letter_error, "failed to move message to dead-letter");
             }
             return;
         }
@@ -352,12 +352,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drops_message_after_exhausting_retries() {
+    async fn dead_letters_message_after_exhausting_retries() {
         let store = MessageStore::open_in_memory().await.unwrap();
         store.enqueue(&msg("doomed")).await.unwrap();
         let sink = FakeSink::always_failing();
 
-        // max_retries=2 => initial + 2 retries = 3 attempts, then discard.
+        // max_retries=2 => initial + 2 retries = 3 attempts, then dead-letter.
         let (tx, handle) = spawn_worker(store.clone(), sink.clone(), 2, 0, false);
         wait_for_len(&store, 0).await;
 
@@ -365,6 +365,11 @@ mod tests {
         handle.await.unwrap();
 
         assert_eq!(sink.calls(), 3, "initial attempt plus two retries");
+        assert_eq!(
+            store.dead_letter_len().await.unwrap(),
+            1,
+            "exhausted message must be moved to dead-letter, not dropped"
+        );
     }
 
     #[tokio::test]

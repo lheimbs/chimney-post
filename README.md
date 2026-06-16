@@ -58,7 +58,7 @@ This is essentially a super narrow version of [mailrise](https://github.com/YoRy
 2. Chimney Post parses the email headers (From, To, Subject) and body.
 3. The message is written to a persistent SQLite outbox. Only after it is durably stored does the server reply `250 OK` (a storage failure yields `451` so the sender retries).
 4. A background worker picks up the earliest *due* message, formats it through the configured MiniJinja template, and sends it as an encrypted Matrix message. On success the message is deleted from the outbox.
-5. If delivery fails, the message is rescheduled with exponential backoff up to the configured retry limit; the worker moves on to the next due message so one failure never blocks the queue. Messages still pending are retained across restarts and retried on the next start.
+5. If delivery fails, the message is rescheduled with exponential backoff up to the configured retry limit; the worker moves on to the next due message so one failure never blocks the queue. Messages still pending are retained across restarts and retried on the next start. A message that exhausts all retries is moved to a `dead_letter` table in the same SQLite database (with its last error) rather than silently dropped, so a permanently undeliverable alert can be inspected and recovered.
 
 ## Getting Started
 
