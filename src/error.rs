@@ -13,6 +13,9 @@ pub enum ChimneyError {
     #[error("SMTP line exceeded the maximum length")]
     SmtpLineTooLong,
 
+    #[error("SMTP DATA ended before the terminator")]
+    SmtpDataIncomplete,
+
     #[error("Matrix error: {0}")]
     Matrix(String),
 

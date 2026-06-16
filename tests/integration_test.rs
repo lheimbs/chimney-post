@@ -307,6 +307,36 @@ async fn smtp_closes_session_exceeding_max_duration() {
 }
 
 #[tokio::test]
+async fn smtp_discards_truncated_data_on_premature_disconnect() {
+    let (bind, store, server_handle) = start_test_server(test_config("127.0.0.1:0", 10240)).await;
+
+    let stream = TcpStream::connect(&bind).await.unwrap();
+    let (read_half, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    read_response(&mut reader).await; // greeting
+    writer.write_all(b"MAIL FROM:<a@b.com>\r\n").await.unwrap();
+    read_response(&mut reader).await;
+    writer.write_all(b"RCPT TO:<c@d.com>\r\n").await.unwrap();
+    read_response(&mut reader).await;
+    writer.write_all(b"DATA\r\n").await.unwrap();
+    read_response(&mut reader).await; // 354
+
+    // Send a partial body and abruptly close WITHOUT the ".\r\n" terminator.
+    writer
+        .write_all(b"Subject: partial\r\n\r\nhalf a mess")
+        .await
+        .unwrap();
+    drop(writer);
+    drop(reader);
+
+    // The truncated message must NOT be enqueued.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(store.len().await.unwrap(), 0);
+
+    server_handle.abort();
+}
+
+#[tokio::test]
 async fn smtp_returns_500_on_oversized_command_line() {
     let (bind, _store, server_handle) = start_test_server(test_config("127.0.0.1:0", 10240)).await;
 
@@ -469,4 +499,106 @@ async fn smtp_returns_503_on_data_before_mail_from() {
     read_response(&mut reader).await;
 
     server_handle.abort();
+}
+
+/// End-to-end durability check: a message accepted over SMTP must survive a
+/// hard crash (no graceful shutdown, nothing delivered) and be redelivered
+/// after a restart that reopens the same on-disk queue.
+#[tokio::test]
+async fn message_survives_crash_and_is_redelivered_on_restart() {
+    use chimney_post::queue::{DeliveryFuture, DeliveryWorker, Message, MessageSink};
+    use std::sync::Mutex;
+    use tokio::sync::watch;
+
+    /// Stands in for the real Matrix client; records what it would have sent.
+    #[derive(Clone, Default)]
+    struct RecordingSink {
+        delivered: Arc<Mutex<Vec<String>>>,
+    }
+    impl MessageSink for RecordingSink {
+        fn deliver<'a>(&'a self, message: &'a Message, _key: &'a str) -> DeliveryFuture<'a> {
+            let delivered = Arc::clone(&self.delivered);
+            let body = message.body.clone();
+            Box::pin(async move {
+                delivered.lock().unwrap().push(body);
+                Ok(())
+            })
+        }
+    }
+
+    // --- first process lifetime: file-backed store + real SMTP server ---
+    let dir = tempfile::tempdir().unwrap();
+    let db_file = dir.path().join("queue.db");
+    let db_path = db_file.to_str().unwrap().to_string();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let bind = format!("127.0.0.1:{port}");
+
+    let mut cfg = test_config(&bind, 10240);
+    cfg.queue.db_path = db_path.clone();
+    let cfg = Arc::new(cfg);
+
+    let store = MessageStore::open_with_max_len(&cfg.queue.db_path, cfg.queue.max_len)
+        .await
+        .unwrap();
+    let server = tokio::spawn(start_smtp_server(Arc::clone(&cfg), store.clone()));
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Accept a message over a real SMTP session.
+    let stream = TcpStream::connect(&bind).await.unwrap();
+    let (read_half, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    read_response(&mut reader).await; // greeting
+    let resp = submit_message(&mut reader, &mut writer, "survive me").await;
+    assert!(resp.starts_with("250"), "Expected 250, got: {resp}");
+
+    // It is durably persisted; no delivery has happened yet.
+    assert_eq!(store.len().await.unwrap(), 1);
+
+    // --- simulate a hard crash: stop the server and drop everything WITHOUT
+    //     a graceful drain and without ever delivering. ---
+    server.abort();
+    drop(writer);
+    drop(reader);
+    drop(store);
+
+    // --- restart: reopen the same database file ---
+    let store2 = MessageStore::open_with_max_len(&db_path, cfg.queue.max_len)
+        .await
+        .unwrap();
+    assert_eq!(
+        store2.len().await.unwrap(),
+        1,
+        "the accepted message must still be queued after the restart"
+    );
+
+    // --- the delivery worker redelivers it on restart ---
+    let sink = RecordingSink::default();
+    let (tx, rx) = watch::channel(false);
+    let worker = DeliveryWorker::new(store2.clone(), sink.clone(), 5, 0);
+    let handle = tokio::spawn(worker.run(rx));
+
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if store2.len().await.unwrap() == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(drained.is_ok(), "worker did not redeliver within 5s");
+
+    tx.send(true).unwrap();
+    handle.await.unwrap();
+
+    let delivered = sink.delivered.lock().unwrap().clone();
+    assert_eq!(delivered.len(), 1, "exactly one redelivery");
+    assert!(
+        delivered[0].contains("survive me"),
+        "redelivered body mismatch: {:?}",
+        delivered[0]
+    );
 }

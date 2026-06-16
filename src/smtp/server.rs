@@ -255,11 +255,10 @@ where
     Ok(bytes)
 }
 
-async fn read_data(
-    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
-    max_size: usize,
-    timeout_seconds: u64,
-) -> Result<String> {
+async fn read_data<R>(reader: &mut R, max_size: usize, timeout_seconds: u64) -> Result<String>
+where
+    R: AsyncBufRead + Unpin,
+{
     let mut data = String::new();
     loop {
         let mut line = String::new();
@@ -279,8 +278,11 @@ async fn read_data(
             Err(_) => return Err(ChimneyError::Smtp("SMTP data read timed out".to_string())),
         };
 
+        // A well-behaved session ends at the `.` terminator below; reaching EOF
+        // here means the client disconnected mid-DATA, so the message is
+        // incomplete and must be discarded rather than delivered truncated.
         if bytes == 0 {
-            break;
+            return Err(ChimneyError::SmtpDataIncomplete);
         }
 
         if line == ".\r\n" || line == ".\n" {
@@ -345,9 +347,58 @@ fn extract_address_after_colon(line: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::read_line_limited;
+    use super::{read_data, read_line_limited};
     use crate::error::ChimneyError;
     use tokio::io::BufReader;
+
+    /// Run `read_data` over an in-memory byte slice.
+    async fn read_data_str(data: &[u8], max_size: usize) -> Result<String, ChimneyError> {
+        let mut reader = BufReader::with_capacity(8, data);
+        read_data(&mut reader, max_size, 5).await
+    }
+
+    #[tokio::test]
+    async fn read_data_returns_the_block_up_to_the_terminator() {
+        let data = read_data_str(b"Subject: hi\r\n\r\nbody\r\n.\r\n", 1024)
+            .await
+            .unwrap();
+        assert_eq!(data, "Subject: hi\r\n\r\nbody\r\n");
+    }
+
+    #[tokio::test]
+    async fn read_data_accepts_an_empty_body() {
+        let data = read_data_str(b".\r\n", 1024).await.unwrap();
+        assert_eq!(data, "");
+    }
+
+    #[tokio::test]
+    async fn read_data_unstuffs_leading_dots() {
+        let data = read_data_str(b"..dotted line\r\n.\r\n", 1024)
+            .await
+            .unwrap();
+        assert_eq!(data, ".dotted line\r\n");
+    }
+
+    #[tokio::test]
+    async fn read_data_errors_on_premature_eof_without_terminator() {
+        // Body with no closing ".\r\n": the client disconnected mid-DATA.
+        let err = read_data_str(b"Subject: x\r\n\r\nhalf a mess", 1024)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChimneyError::SmtpDataIncomplete));
+    }
+
+    #[tokio::test]
+    async fn read_data_errors_on_immediate_eof() {
+        let err = read_data_str(b"", 1024).await.unwrap_err();
+        assert!(matches!(err, ChimneyError::SmtpDataIncomplete));
+    }
+
+    #[tokio::test]
+    async fn read_data_enforces_the_size_limit() {
+        let err = read_data_str(b"123456789\r\n.\r\n", 8).await.unwrap_err();
+        assert!(matches!(err, ChimneyError::SmtpSizeExceeded));
+    }
 
     /// Read a single line from `data`, using a BufReader with the given internal
     /// `cap` (small values force multiple `fill_buf` chunks).
