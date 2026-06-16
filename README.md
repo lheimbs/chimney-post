@@ -217,7 +217,9 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now chimney-post
 ```
 
-The service unit runs with `DynamicUser=yes` and strict filesystem protections (read-only root, private `/tmp`, no new privileges). State data (E2EE key store) is kept under `/var/lib/chimney-post`.
+The service unit runs with `DynamicUser=yes` and an extensive sandbox: read-only root, private `/tmp` and `/dev`, dropped capabilities, kernel/`/proc` protections, a `@system-service` syscall allow-list, and a restricted set of address families (`systemd-analyze security` rates it ~1.3 "OK"). State data (the E2EE key store and the SQLite queue) is kept under `/var/lib/chimney-post`.
+
+Two directives are the most likely to need adjustment for your host and are commented as such in the unit: `MemoryDenyWriteExecute=yes` and `PrivateUsers=yes` — if the service fails to start, remove these first and check `journalctl -u chimney-post` for "Operation not permitted". If you bind to a port below 1024, you must also grant `CAP_NET_BIND_SERVICE` (see the comment in the unit). `IPAddressDeny` is intentionally not set because the service needs egress to an arbitrary homeserver IP and ingress from your LAN — restrict the SMTP port with a host firewall instead.
 
 Set secrets in a systemd environment file or drop-in override:
 
