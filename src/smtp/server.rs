@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio::time::{timeout, Duration};
 use tracing::{info, warn};
 
@@ -23,21 +24,49 @@ pub async fn start_smtp_server(config: Arc<Config>, store: MessageStore) -> Resu
     let listener = TcpListener::bind(bind_addr).await?;
     info!(bind = %bind_addr, "SMTP server listening");
 
+    let connection_limiter = Arc::new(Semaphore::new(config.smtp.max_connections.max(1)));
+
     loop {
-        let (stream, remote_addr) = match listener.accept().await {
+        let (mut stream, remote_addr) = match listener.accept().await {
             Ok(conn) => conn,
             Err(error) => {
                 warn!(error = %error, "Failed to accept SMTP connection");
                 continue;
             }
         };
+
+        // Acquire a connection slot before doing any work. If the cap is
+        // reached, reject with 421 and close so a flood cannot exhaust file
+        // descriptors, tasks, or memory. The permit is held for the connection's
+        // lifetime and released when the handler task ends.
+        let permit = match Arc::clone(&connection_limiter).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                warn!(remote = %remote_addr, "connection limit reached; rejecting with 421");
+                tokio::spawn(async move {
+                    let _ = stream.write_all(b"421 Too many connections\r\n").await;
+                });
+                continue;
+            }
+        };
+
         let store_clone = store.clone();
         let config_clone = Arc::clone(&config);
         tokio::spawn(async move {
-            if let Err(error) =
-                handle_connection(stream, remote_addr, config_clone, store_clone).await
+            let _permit = permit;
+            let session_deadline =
+                Duration::from_secs(config_clone.smtp.max_session_seconds.max(1));
+            match timeout(
+                session_deadline,
+                handle_connection(stream, remote_addr, config_clone, store_clone),
+            )
+            .await
             {
-                warn!(error = %error, "SMTP connection failed");
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => warn!(error = %error, "SMTP connection failed"),
+                Err(_) => {
+                    warn!(remote = %remote_addr, "SMTP session exceeded max duration; closing")
+                }
             }
         });
     }

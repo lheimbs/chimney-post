@@ -31,6 +31,23 @@ pub struct SmtpConfig {
     pub bind: String,
     pub max_message_size: usize,
     pub timeout: u64,
+    /// Maximum number of simultaneous SMTP connections. Excess connections are
+    /// rejected with `421` so a flood cannot exhaust file descriptors or memory.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+    /// Maximum lifetime of a single SMTP session in seconds, independent of the
+    /// per-read `timeout`. Bounds slowloris-style connections that dribble bytes
+    /// just often enough to keep the per-read timeout from firing.
+    #[serde(default = "default_max_session_seconds")]
+    pub max_session_seconds: u64,
+}
+
+fn default_max_connections() -> usize {
+    100
+}
+
+fn default_max_session_seconds() -> u64 {
+    300
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -119,6 +136,18 @@ impl Config {
         if self.smtp.max_message_size == 0 {
             return Err(ChimneyError::Config(
                 "smtp.max_message_size must be greater than zero".to_string(),
+            ));
+        }
+
+        if self.smtp.max_connections == 0 {
+            return Err(ChimneyError::Config(
+                "smtp.max_connections must be greater than zero".to_string(),
+            ));
+        }
+
+        if self.smtp.max_session_seconds == 0 {
+            return Err(ChimneyError::Config(
+                "smtp.max_session_seconds must be greater than zero".to_string(),
             ));
         }
 
@@ -265,6 +294,8 @@ mod tests {
                 bind: "127.0.0.1:2525".to_string(),
                 max_message_size: 1024,
                 timeout: 30,
+                max_connections: 100,
+                max_session_seconds: 300,
             },
             matrix: MatrixConfig {
                 homeserver: "https://example.org".to_string(),

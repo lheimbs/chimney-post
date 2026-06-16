@@ -22,6 +22,8 @@ fn test_config(bind: &str, max_message_size: usize) -> Config {
             bind: bind.to_string(),
             max_message_size,
             timeout: 5,
+            max_connections: 100,
+            max_session_seconds: 300,
         },
         matrix: MatrixConfig {
             homeserver: "https://example.org".to_string(),
@@ -195,6 +197,66 @@ async fn smtp_returns_552_on_oversized_message() {
         .unwrap();
     let resp = read_response(&mut reader).await;
     assert!(resp.starts_with("552"), "Expected 552, got: {resp}");
+
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn smtp_rejects_connections_over_the_limit() {
+    let mut cfg = test_config("127.0.0.1:0", 10240);
+    cfg.smtp.max_connections = 1;
+    let (bind, _store, server_handle) = start_test_server(cfg).await;
+
+    // Connection A holds the only permit (kept open for the rest of the test).
+    let stream_a = TcpStream::connect(&bind).await.unwrap();
+    let (read_a, _write_a) = stream_a.into_split();
+    let mut reader_a = BufReader::new(read_a);
+    assert!(read_response(&mut reader_a).await.starts_with("220"));
+
+    // Connection B must be rejected with 421 because no permit is free.
+    let stream_b = TcpStream::connect(&bind).await.unwrap();
+    let (read_b, _write_b) = stream_b.into_split();
+    let mut reader_b = BufReader::new(read_b);
+    let resp_b = read_response(&mut reader_b).await;
+    assert!(resp_b.starts_with("421"), "Expected 421, got: {resp_b}");
+
+    // Once A releases its slot, a new connection is accepted again.
+    drop(reader_a);
+    drop(_write_a);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let stream_c = TcpStream::connect(&bind).await.unwrap();
+    let (read_c, _write_c) = stream_c.into_split();
+    let mut reader_c = BufReader::new(read_c);
+    assert!(read_response(&mut reader_c).await.starts_with("220"));
+
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn smtp_closes_session_exceeding_max_duration() {
+    let mut cfg = test_config("127.0.0.1:0", 10240);
+    cfg.smtp.timeout = 30; // generous per-read timeout
+    cfg.smtp.max_session_seconds = 1; // short overall session cap
+    let (bind, _store, server_handle) = start_test_server(cfg).await;
+
+    let stream = TcpStream::connect(&bind).await.unwrap();
+    let (read_half, _writer) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    assert!(read_response(&mut reader).await.starts_with("220"));
+
+    // Stay idle. The 1s session cap must close the connection well before the
+    // 30s per-read timeout would fire; the next read should see EOF.
+    let mut line = String::new();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        reader.read_line(&mut line),
+    )
+    .await;
+    match result {
+        Ok(Ok(n)) => assert_eq!(n, 0, "expected EOF, got {n} bytes: {line:?}"),
+        Ok(Err(_)) => {} // a reset is also an acceptable close
+        Err(_) => panic!("connection not closed within 5s despite 1s session cap"),
+    }
 
     server_handle.abort();
 }
