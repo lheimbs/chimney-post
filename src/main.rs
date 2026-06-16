@@ -1,7 +1,7 @@
 use chimney_post::config::Config;
 use chimney_post::error::{ChimneyError, Result};
 use chimney_post::matrix::MatrixClient;
-use chimney_post::queue::{DeliveryWorker, MessageStore};
+use chimney_post::queue::{run_with_reconnect, MessageStore};
 use chimney_post::smtp::start_smtp_server;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +15,10 @@ use tracing_subscriber::EnvFilter;
 /// shutdown before giving up. Undelivered messages remain persisted regardless.
 const SHUTDOWN_DRAIN_SECONDS: u64 = 30;
 
+/// How long to wait before retrying the Matrix connection at startup / after it
+/// drops. SMTP keeps accepting and queuing mail throughout.
+const RECONNECT_BACKOFF_SECONDS: u64 = 10;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = Config::load_default()?;
@@ -24,18 +28,33 @@ async fn main() -> Result<()> {
 
     let store =
         MessageStore::open_with_max_len(&config.queue.db_path, config.queue.max_len).await?;
-    let matrix = MatrixClient::connect(config.as_ref()).await?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let worker = DeliveryWorker::new(
-        store.clone(),
-        matrix,
-        config.queue.max_retries,
-        config.queue.retry_backoff,
-    );
-    let mut worker_handle = tokio::spawn(worker.run(shutdown_rx));
+    // Start accepting and queuing mail immediately, before Matrix is connected,
+    // so a homeserver outage at boot doesn't refuse mail or crash-loop the
+    // service. The worker connects in the background (retrying) and drains the
+    // queue once it's up.
     let mut smtp_handle = tokio::spawn(start_smtp_server(Arc::clone(&config), store.clone()));
+
+    let worker_config = Arc::clone(&config);
+    let worker_store = store.clone();
+    let mut worker_handle = tokio::spawn(async move {
+        let connect_config = Arc::clone(&worker_config);
+        let connect = move || {
+            let cfg = Arc::clone(&connect_config);
+            async move { MatrixClient::connect(cfg.as_ref()).await }
+        };
+        run_with_reconnect(
+            worker_store,
+            connect,
+            worker_config.queue.max_retries,
+            worker_config.queue.retry_backoff,
+            Duration::from_secs(RECONNECT_BACKOFF_SECONDS),
+            shutdown_rx,
+        )
+        .await;
+    });
 
     let mut sigterm = unix_signal(SignalKind::terminate())?;
 

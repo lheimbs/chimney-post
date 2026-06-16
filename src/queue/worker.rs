@@ -162,6 +162,48 @@ impl<S: MessageSink> DeliveryWorker<S> {
     }
 }
 
+/// Obtain a [`MessageSink`] via `connect` (retrying on failure) and then run a
+/// [`DeliveryWorker`] against `store`, until `shutdown` is set.
+///
+/// This lets the SMTP server start accepting and queuing mail immediately while
+/// the connection to the sink (the Matrix homeserver) is established in the
+/// background: queued messages are delivered once it connects, and a connect
+/// failure is retried rather than crashing the process.
+pub async fn run_with_reconnect<S, C, F>(
+    store: MessageStore,
+    mut connect: C,
+    max_retries: u32,
+    retry_backoff: u64,
+    reconnect_backoff: Duration,
+    mut shutdown: watch::Receiver<bool>,
+) where
+    S: MessageSink,
+    C: FnMut() -> F,
+    F: std::future::Future<Output = Result<S>>,
+{
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+
+        match connect().await {
+            Ok(sink) => {
+                let worker = DeliveryWorker::new(store.clone(), sink, max_retries, retry_backoff);
+                // run() returns only once shutdown is set.
+                worker.run(shutdown).await;
+                return;
+            }
+            Err(error) => {
+                error!(%error, "failed to connect the delivery sink; will retry");
+                tokio::select! {
+                    _ = sleep(reconnect_backoff) => {}
+                    _ = shutdown.changed() => {}
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,6 +509,81 @@ mod tests {
             keys,
             vec![format!("chimney-post-{id1}"), format!("chimney-post-{id2}")]
         );
+    }
+
+    #[tokio::test]
+    async fn run_with_reconnect_delivers_after_failed_connects() {
+        let store = MessageStore::open_in_memory().await.unwrap();
+        store.enqueue(&msg("q")).await.unwrap();
+        let sink = FakeSink::default();
+        let attempts = Arc::new(AtomicUsize::new(0));
+
+        let connect = {
+            let attempts = Arc::clone(&attempts);
+            let sink = sink.clone();
+            move || {
+                let attempts = Arc::clone(&attempts);
+                let sink = sink.clone();
+                async move {
+                    // Fail the first two connect attempts, then succeed.
+                    if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+                        Err(ChimneyError::Matrix("connect not ready".into()))
+                    } else {
+                        Ok(sink)
+                    }
+                }
+            }
+        };
+
+        let (tx, rx) = watch::channel(false);
+        let handle = tokio::spawn(run_with_reconnect(
+            store.clone(),
+            connect,
+            5,
+            60,
+            Duration::from_millis(10),
+            rx,
+        ));
+
+        wait_for_len(&store, 0).await;
+        tx.send(true).unwrap();
+        handle.await.unwrap();
+
+        assert!(
+            attempts.load(Ordering::SeqCst) >= 3,
+            "should retry connect until it succeeds"
+        );
+        assert_eq!(sink.delivered_bodies(), vec!["q".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn run_with_reconnect_stops_on_shutdown_while_disconnected() {
+        let store = MessageStore::open_in_memory().await.unwrap();
+        store.enqueue(&msg("stuck")).await.unwrap();
+
+        // The sink never connects.
+        let connect = || async { Err::<FakeSink, _>(ChimneyError::Matrix("never".into())) };
+
+        let (tx, rx) = watch::channel(false);
+        let handle = tokio::spawn(run_with_reconnect(
+            store.clone(),
+            connect,
+            5,
+            60,
+            Duration::from_secs(60), // long backoff: shutdown must interrupt it
+            rx,
+        ));
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tx.send(true).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("must stop promptly despite the 60s reconnect backoff")
+            .unwrap();
+
+        // Never delivered; the message stays queued for a future start.
+        assert_eq!(store.len().await.unwrap(), 1);
     }
 
     #[tokio::test]
