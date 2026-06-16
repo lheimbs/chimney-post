@@ -10,6 +10,9 @@ pub enum ChimneyError {
     #[error("SMTP message size exceeded")]
     SmtpSizeExceeded,
 
+    #[error("SMTP line exceeded the maximum length")]
+    SmtpLineTooLong,
+
     #[error("Matrix error: {0}")]
     Matrix(String),
 

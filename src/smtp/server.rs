@@ -4,10 +4,15 @@ use crate::queue::MessageStore;
 use crate::smtp::parser::parse_data;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{timeout, Duration};
 use tracing::{info, warn};
+
+/// Maximum length of a single SMTP command line, in bytes. RFC 5321 §4.5.3.1.4
+/// mandates at least 512 octets; we allow more headroom for long EHLO/parameters
+/// but still bound it so a client cannot exhaust memory with one endless line.
+const MAX_COMMAND_LINE_BYTES: usize = 4096;
 
 pub async fn start_smtp_server(config: Arc<Config>, store: MessageStore) -> Result<()> {
     let bind_addr: SocketAddr =
@@ -59,12 +64,16 @@ async fn handle_connection(
         buffer.clear();
         let read_result = timeout(
             Duration::from_secs(config.smtp.timeout),
-            reader.read_line(&mut buffer),
+            read_line_limited(&mut reader, &mut buffer, MAX_COMMAND_LINE_BYTES),
         )
         .await;
         let bytes = match read_result {
             Ok(Ok(bytes)) => bytes,
-            Ok(Err(error)) => return Err(error.into()),
+            Ok(Err(ChimneyError::SmtpLineTooLong)) => {
+                writer.write_all(b"500 Line too long\r\n").await?;
+                break;
+            }
+            Ok(Err(error)) => return Err(error),
             Err(_) => {
                 return Err(ChimneyError::Smtp("SMTP session timed out".to_string()));
             }
@@ -171,6 +180,52 @@ async fn handle_connection(
     Ok(())
 }
 
+/// Read one `\n`-terminated line into `buf` as UTF-8, consuming at most
+/// `max_bytes` bytes from `reader`. Returns the number of bytes read (0 = EOF).
+///
+/// Returns [`ChimneyError::SmtpLineTooLong`] if the line would exceed
+/// `max_bytes`, bounding per-line memory regardless of how the client behaves
+/// (e.g. a never-ending line with no newline). Reading is done over `fill_buf`
+/// so the cap is enforced incrementally, before the whole line is buffered.
+async fn read_line_limited<R>(reader: &mut R, buf: &mut String, max_bytes: usize) -> Result<usize>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut raw: Vec<u8> = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            break; // EOF
+        }
+
+        match available.iter().position(|&b| b == b'\n') {
+            Some(idx) => {
+                let take = idx + 1;
+                if raw.len() + take > max_bytes {
+                    return Err(ChimneyError::SmtpLineTooLong);
+                }
+                raw.extend_from_slice(&available[..take]);
+                reader.consume(take);
+                break;
+            }
+            None => {
+                let take = available.len();
+                if raw.len() + take > max_bytes {
+                    return Err(ChimneyError::SmtpLineTooLong);
+                }
+                raw.extend_from_slice(available);
+                reader.consume(take);
+            }
+        }
+    }
+
+    let bytes = raw.len();
+    let text = String::from_utf8(raw)
+        .map_err(|_| ChimneyError::Smtp("invalid UTF-8 in SMTP line".to_string()))?;
+    buf.push_str(&text);
+    Ok(bytes)
+}
+
 async fn read_data(
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
     max_size: usize,
@@ -179,14 +234,19 @@ async fn read_data(
     let mut data = String::new();
     loop {
         let mut line = String::new();
+        // Bound each line read to the remaining size budget (plus a little slack
+        // for the terminator / dot-unstuffing) so peak memory stays ~max_size
+        // even if a client never sends a newline.
+        let remaining = max_size.saturating_sub(data.len()).saturating_add(4);
         let read_result = timeout(
             Duration::from_secs(timeout_seconds),
-            reader.read_line(&mut line),
+            read_line_limited(reader, &mut line, remaining),
         )
         .await;
         let bytes = match read_result {
             Ok(Ok(bytes)) => bytes,
-            Ok(Err(error)) => return Err(error.into()),
+            Ok(Err(ChimneyError::SmtpLineTooLong)) => return Err(ChimneyError::SmtpSizeExceeded),
+            Ok(Err(error)) => return Err(error),
             Err(_) => return Err(ChimneyError::Smtp("SMTP data read timed out".to_string())),
         };
 
@@ -252,4 +312,94 @@ fn extract_address_after_colon(line: &str) -> Option<String> {
             .trim_matches('>')
             .to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_line_limited;
+    use crate::error::ChimneyError;
+    use tokio::io::BufReader;
+
+    /// Read a single line from `data`, using a BufReader with the given internal
+    /// `cap` (small values force multiple `fill_buf` chunks).
+    async fn read_one(
+        data: &[u8],
+        cap: usize,
+        max: usize,
+    ) -> Result<(String, usize), ChimneyError> {
+        let mut reader = BufReader::with_capacity(cap, data);
+        let mut buf = String::new();
+        let n = read_line_limited(&mut reader, &mut buf, max).await?;
+        Ok((buf, n))
+    }
+
+    #[tokio::test]
+    async fn reads_a_simple_line_including_newline() {
+        let (line, n) = read_one(b"EHLO test\r\n", 64, 4096).await.unwrap();
+        assert_eq!(line, "EHLO test\r\n");
+        assert_eq!(n, 11);
+    }
+
+    #[tokio::test]
+    async fn line_exactly_at_limit_is_accepted() {
+        let (line, n) = read_one(b"abcd\n", 64, 5).await.unwrap();
+        assert_eq!(line, "abcd\n");
+        assert_eq!(n, 5);
+    }
+
+    #[tokio::test]
+    async fn line_one_over_limit_is_rejected() {
+        let err = read_one(b"abcde\n", 64, 5).await.unwrap_err();
+        assert!(matches!(err, ChimneyError::SmtpLineTooLong));
+    }
+
+    #[tokio::test]
+    async fn cap_is_enforced_across_chunks_for_a_line_without_newline() {
+        // 100 bytes, no newline, tiny buffer: must error rather than buffer it all.
+        let data = vec![b'A'; 100];
+        let err = read_one(&data, 4, 16).await.unwrap_err();
+        assert!(matches!(err, ChimneyError::SmtpLineTooLong));
+    }
+
+    #[tokio::test]
+    async fn handles_a_line_split_across_many_chunks() {
+        let (line, n) = read_one(b"hello world\n", 4, 4096).await.unwrap();
+        assert_eq!(line, "hello world\n");
+        assert_eq!(n, 12);
+    }
+
+    #[tokio::test]
+    async fn eof_without_newline_returns_remaining_then_zero() {
+        let mut reader = BufReader::with_capacity(8, &b"partial"[..]);
+        let mut buf = String::new();
+        let n = read_line_limited(&mut reader, &mut buf, 4096)
+            .await
+            .unwrap();
+        assert_eq!(buf, "partial");
+        assert_eq!(n, 7);
+
+        let mut buf2 = String::new();
+        let n2 = read_line_limited(&mut reader, &mut buf2, 4096)
+            .await
+            .unwrap();
+        assert_eq!(n2, 0);
+        assert!(buf2.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reads_multiple_sequential_lines() {
+        let mut reader = BufReader::with_capacity(4, &b"one\r\ntwo\r\n"[..]);
+        let mut a = String::new();
+        read_line_limited(&mut reader, &mut a, 4096).await.unwrap();
+        assert_eq!(a, "one\r\n");
+        let mut b = String::new();
+        read_line_limited(&mut reader, &mut b, 4096).await.unwrap();
+        assert_eq!(b, "two\r\n");
+    }
+
+    #[tokio::test]
+    async fn invalid_utf8_is_rejected() {
+        let err = read_one(&[0xff, 0xfe, b'\n'], 64, 4096).await.unwrap_err();
+        assert!(matches!(err, ChimneyError::Smtp(_)));
+    }
 }

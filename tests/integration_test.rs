@@ -200,6 +200,54 @@ async fn smtp_returns_552_on_oversized_message() {
 }
 
 #[tokio::test]
+async fn smtp_returns_500_on_oversized_command_line() {
+    let (bind, _store, server_handle) = start_test_server(test_config("127.0.0.1:0", 10240)).await;
+
+    let stream = TcpStream::connect(&bind).await.unwrap();
+    let (read_half, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+
+    read_response(&mut reader).await; // greeting
+
+    // A single command line far larger than the command-line cap, with no
+    // newline, must be rejected (500) rather than buffered unboundedly.
+    let huge = vec![b'A'; 5000];
+    writer.write_all(&huge).await.unwrap();
+
+    let resp = read_response(&mut reader).await;
+    assert!(resp.starts_with("500"), "Expected 500, got: {resp}");
+
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn smtp_returns_552_on_oversized_data_line_without_newline() {
+    let (bind, _store, server_handle) = start_test_server(test_config("127.0.0.1:0", 64)).await;
+
+    let stream = TcpStream::connect(&bind).await.unwrap();
+    let (read_half, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+
+    read_response(&mut reader).await; // greeting
+    writer.write_all(b"MAIL FROM:<a@b.com>\r\n").await.unwrap();
+    read_response(&mut reader).await;
+    writer.write_all(b"RCPT TO:<c@d.com>\r\n").await.unwrap();
+    read_response(&mut reader).await;
+    writer.write_all(b"DATA\r\n").await.unwrap();
+    read_response(&mut reader).await; // 354
+
+    // A single DATA line with no newline, much larger than max_message_size,
+    // must trip the size limit (552) without being buffered in full.
+    let huge = vec![b'X'; 4000];
+    writer.write_all(&huge).await.unwrap();
+
+    let resp = read_response(&mut reader).await;
+    assert!(resp.starts_with("552"), "Expected 552, got: {resp}");
+
+    server_handle.abort();
+}
+
+#[tokio::test]
 async fn smtp_returns_502_on_unknown_command() {
     let (bind, _queue, server_handle) = start_test_server(test_config("127.0.0.1:0", 10240)).await;
 
