@@ -57,6 +57,20 @@ fn is_mismatched_account(error: &matrix_sdk::Error) -> bool {
     message_indicates_mismatch(&error.to_string())
 }
 
+/// Errors only when a configured `device_id` provably differs from the device
+/// the homeserver reports for this session. A missing configured value (no pin)
+/// or a missing server value (homeserver didn't report one) is not an error.
+fn verify_device_id(configured: Option<&str>, server: Option<&str>) -> Result<()> {
+    match (configured, server) {
+        (Some(want), Some(got)) if want != got => Err(ChimneyError::Config(format!(
+            "configured matrix.credentials.device_id ({want}) does not match the device \
+             the homeserver issued for this session ({got}); fix device_id or clear the \
+             crypto store"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// Matches the distinctive text of `CryptoStoreError::MismatchedAccount`. This
 /// is far more specific than "doesn't match", which also appears in unrelated
 /// crypto errors (sender, public-key, and room-id mismatches) that must not
@@ -212,6 +226,22 @@ impl MatrixClient {
             ));
         }
 
+        // Verify the device we authenticated as matches a pinned device_id, so a
+        // stale/mismatched device_id fails loudly here instead of silently
+        // churning the crypto store on every restart.
+        let server_device_id = client
+            .whoami()
+            .await
+            .map_err(|error| ChimneyError::Matrix(format!("Matrix whoami failed: {error}")))?
+            .device_id;
+        verify_device_id(
+            config.matrix.credentials.device_id.as_deref(),
+            server_device_id.as_deref().map(|d| d.as_str()),
+        )?;
+        if config.matrix.credentials.device_id.is_some() && server_device_id.is_none() {
+            warn!("could not verify device_id: homeserver returned no device id from whoami");
+        }
+
         // Perform initial sync to load encryption keys
         client
             .sync_once(SyncSettings::default())
@@ -323,7 +353,31 @@ impl MessageSink for MatrixClient {
 
 #[cfg(test)]
 mod tests {
-    use super::message_indicates_mismatch;
+    use super::{message_indicates_mismatch, verify_device_id};
+
+    #[test]
+    fn device_id_ok_when_matching() {
+        assert!(verify_device_id(Some("ABCD"), Some("ABCD")).is_ok());
+    }
+
+    #[test]
+    fn device_id_errors_when_mismatched() {
+        let err = verify_device_id(Some("ABCD"), Some("WXYZ")).unwrap_err();
+        assert!(err.to_string().contains("does not match"));
+    }
+
+    #[test]
+    fn device_id_ok_when_not_configured() {
+        // No pin to check against.
+        assert!(verify_device_id(None, Some("WXYZ")).is_ok());
+        assert!(verify_device_id(None, None).is_ok());
+    }
+
+    #[test]
+    fn device_id_ok_when_server_reports_none() {
+        // Can't disprove a match; handled by a warning in the caller, not an error.
+        assert!(verify_device_id(Some("ABCD"), None).is_ok());
+    }
 
     #[test]
     fn detects_wrapped_account_mismatch() {
