@@ -115,11 +115,13 @@ All settings live in a single TOML file. See `config.example.toml` for a fully a
 
 ### `[smtp]`
 
-| Key                | Default          | Description                                                               |
-|--------------------|------------------|---------------------------------------------------------------------------|
-| `bind`             | `127.0.0.1:2525` | Address and port the SMTP server listens on. Must be a localhost address. |
-| `max_message_size` | `10485760`       | Maximum email size in bytes (10 MB).                                      |
-| `timeout`          | `30`             | Connection timeout in seconds.                                            |
+| Key                   | Default          | Description                                                                          |
+|-----------------------|------------------|--------------------------------------------------------------------------------------|
+| `bind`                | `127.0.0.1:2525` | Address and port the SMTP server listens on.                                         |
+| `max_message_size`    | `10485760`       | Maximum email size in bytes (10 MB).                                                  |
+| `timeout`             | `30`             | Per-read timeout in seconds (wait for the next line).                                 |
+| `max_connections`     | `100`            | Maximum simultaneous connections; excess are rejected with `421`.                    |
+| `max_session_seconds` | `300`            | Maximum lifetime of one SMTP session, bounding slow/stuck connections.               |
 
 ### `[matrix]`
 
@@ -166,6 +168,7 @@ Provide **either** the password **or** the access_token + device_id pair:
 | `max_retries`   | `5`                              | Maximum retries after the initial attempt before a message is dropped.   |
 | `retry_backoff` | `60`                             | Base backoff interval in seconds (doubles each retry, capped at 900s).   |
 | `db_path`       | `/var/lib/chimney-post/queue.db` | Path to the persistent SQLite outbox; must be writable by the service.   |
+| `max_len`       | `10000`                          | Max queued messages before new mail is refused with `451`. `0` = unlimited. |
 
 ## Message Templates
 

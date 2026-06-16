@@ -3,8 +3,13 @@
 bind = "127.0.0.1:2525"
 # Maximum message size in bytes
 max_message_size = 10485760  # 10MB
-# Connection timeout in seconds
+# Per-read timeout in seconds (how long to wait for the next line)
 timeout = 30
+# Maximum number of simultaneous connections; excess are rejected with 421
+max_connections = 100
+# Maximum lifetime of a single SMTP session in seconds (bounds slow/stuck
+# connections beyond what the per-read timeout catches)
+max_session_seconds = 300
 
 [matrix]
 # Homeserver URL
@@ -73,3 +78,6 @@ retry_backoff = 60
 # being acknowledged and only removed once delivered to Matrix, so messages
 # survive restarts and crashes. Must be writable by the service user.
 db_path = "/var/lib/chimney-post/queue.db"
+# Maximum number of messages held in the outbox before new mail is refused with
+# a temporary 451 (backpressure, e.g. while Matrix is unreachable). 0 = unlimited.
+max_len = 10000

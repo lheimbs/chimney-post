@@ -337,4 +337,33 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("template"));
     }
+
+    #[test]
+    fn example_config_parses_and_validates() {
+        // The shipped example must always deserialize and pass validation
+        // (env-var placeholders are left as-is; only structure/template are checked).
+        let text = include_str!("../config.example.toml");
+        let config: Config = toml::from_str(text).expect("config.example.toml must parse");
+        config
+            .validate()
+            .expect("config.example.toml must pass validation");
+    }
+
+    #[test]
+    fn example_config_documents_all_tunables() {
+        // Guard against config keys drifting out of the documented example.
+        let text = include_str!("../config.example.toml");
+        for key in [
+            "max_message_size",
+            "timeout",
+            "max_connections",
+            "max_session_seconds",
+            "max_retries",
+            "retry_backoff",
+            "db_path",
+            "max_len",
+        ] {
+            assert!(text.contains(key), "config.example.toml is missing `{key}`");
+        }
+    }
 }
