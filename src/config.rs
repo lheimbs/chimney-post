@@ -167,6 +167,14 @@ impl Config {
             ));
         }
 
+        if self.queue.retry_backoff == 0 {
+            return Err(ChimneyError::Config(
+                "queue.retry_backoff must be greater than zero (a zero backoff would \
+                 retry a failing message in a tight loop)"
+                    .to_string(),
+            ));
+        }
+
         if is_blank(&self.matrix.homeserver) {
             return Err(ChimneyError::Config(
                 "matrix.homeserver must not be empty".to_string(),
@@ -336,6 +344,19 @@ mod tests {
         let result = config.validate();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("template"));
+    }
+
+    fn valid_config() -> Config {
+        let text = include_str!("../config.example.toml");
+        toml::from_str(text).expect("config.example.toml must parse")
+    }
+
+    #[test]
+    fn validate_rejects_zero_retry_backoff() {
+        let mut config = valid_config();
+        config.queue.retry_backoff = 0;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("retry_backoff"));
     }
 
     #[test]
