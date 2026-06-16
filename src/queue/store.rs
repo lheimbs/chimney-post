@@ -220,7 +220,10 @@ impl MessageStore {
     {
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().expect("queue database mutex poisoned");
+            // Recover from a poisoned mutex rather than propagating the panic:
+            // the SQLite connection is still usable, so one panicking operation
+            // must not permanently wedge every future enqueue and delivery.
+            let guard = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             f(&guard)
         })
         .await
@@ -422,6 +425,25 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(store.len().await.unwrap(), 50);
+    }
+
+    #[tokio::test]
+    async fn recovers_from_a_poisoned_mutex() {
+        let store = MessageStore::open_in_memory().await.unwrap();
+        store.enqueue(&msg("before", &["x@x.com"])).await.unwrap();
+
+        // Poison the connection mutex by panicking while holding it.
+        let conn = Arc::clone(&store.conn);
+        let _ = std::thread::spawn(move || {
+            let _guard = conn.lock().unwrap();
+            panic!("poison the mutex");
+        })
+        .join();
+
+        // Operations must still succeed despite the poisoned mutex.
+        assert_eq!(store.len().await.unwrap(), 1);
+        store.enqueue(&msg("after", &["x@x.com"])).await.unwrap();
+        assert_eq!(store.len().await.unwrap(), 2);
     }
 
     #[test]
