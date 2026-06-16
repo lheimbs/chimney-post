@@ -7,7 +7,7 @@ use matrix_sdk::authentication::SessionTokens;
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::encryption::CryptoStoreError;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
-use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId};
+use matrix_sdk::ruma::{OwnedRoomId, OwnedTransactionId, OwnedUserId};
 use matrix_sdk::Client;
 use matrix_sdk::SessionMeta;
 use std::path::Path;
@@ -251,8 +251,13 @@ impl MatrixClient {
         })
     }
 
-    pub async fn send_message(&self, message: &Message) -> Result<()> {
+    /// Send `message` to the configured room. `idempotency_key` is used as the
+    /// Matrix transaction id so that a redelivery of the same queued message
+    /// (e.g. after a lost response) is deduplicated by the homeserver within the
+    /// session rather than appearing twice.
+    pub async fn send_message(&self, message: &Message, idempotency_key: &str) -> Result<()> {
         let formatted = format_message(message, &self.message_template)?;
+        let transaction_id = OwnedTransactionId::from(idempotency_key);
 
         let room = match self.client.get_room(&self.room_id) {
             Some(room) => room,
@@ -296,6 +301,7 @@ impl MatrixClient {
         let content = RoomMessageEventContent::text_plain(formatted);
 
         room.send(content)
+            .with_transaction_id(transaction_id)
             .await
             .map_err(|error| ChimneyError::Matrix(format!("Matrix send failed: {error}")))?;
 
@@ -310,8 +316,8 @@ impl MatrixClient {
 }
 
 impl MessageSink for MatrixClient {
-    fn deliver<'a>(&'a self, message: &'a Message) -> DeliveryFuture<'a> {
-        Box::pin(self.send_message(message))
+    fn deliver<'a>(&'a self, message: &'a Message, idempotency_key: &'a str) -> DeliveryFuture<'a> {
+        Box::pin(self.send_message(message, idempotency_key))
     }
 }
 

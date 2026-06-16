@@ -14,8 +14,11 @@ pub type DeliveryFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + '
 
 /// Something that can deliver a message (e.g. the Matrix client). Abstracted so
 /// the delivery worker can be tested without a live homeserver.
+///
+/// `idempotency_key` is stable for a given queued message across retries, so a
+/// sink can deduplicate a redelivery (e.g. after a lost response).
 pub trait MessageSink: Send + Sync {
-    fn deliver<'a>(&'a self, message: &'a Message) -> DeliveryFuture<'a>;
+    fn deliver<'a>(&'a self, message: &'a Message, idempotency_key: &'a str) -> DeliveryFuture<'a>;
 }
 
 /// Hard ceiling on the retry backoff, regardless of attempt count.
@@ -108,7 +111,9 @@ impl<S: MessageSink> DeliveryWorker<S> {
 
     async fn deliver_one(&self, stored: StoredMessage, now: i64) {
         let id = stored.id;
-        match self.sink.deliver(&stored.message).await {
+        // Stable across retries of this row, so the sink can dedupe a redelivery.
+        let idempotency_key = format!("chimney-post-{id}");
+        match self.sink.deliver(&stored.message, &idempotency_key).await {
             Ok(()) => match self.store.mark_delivered(id).await {
                 Ok(()) => info!(id, "message delivered to Matrix"),
                 Err(error) => error!(
@@ -169,6 +174,7 @@ mod tests {
     #[derive(Default)]
     struct FakeInner {
         delivered: Mutex<Vec<Message>>,
+        keys: Mutex<Vec<String>>,
         calls: AtomicUsize,
         fail_first: AtomicUsize,
         always_fail: bool,
@@ -222,14 +228,24 @@ mod tests {
                 .map(|m| m.body.clone())
                 .collect()
         }
+
+        fn keys(&self) -> Vec<String> {
+            self.inner.keys.lock().unwrap().clone()
+        }
     }
 
     impl MessageSink for FakeSink {
-        fn deliver<'a>(&'a self, message: &'a Message) -> DeliveryFuture<'a> {
+        fn deliver<'a>(
+            &'a self,
+            message: &'a Message,
+            idempotency_key: &'a str,
+        ) -> DeliveryFuture<'a> {
             let inner = Arc::clone(&self.inner);
             let message = message.clone();
+            let key = idempotency_key.to_string();
             Box::pin(async move {
                 inner.calls.fetch_add(1, Ordering::SeqCst);
+                inner.keys.lock().unwrap().push(key);
 
                 if inner.always_fail {
                     return Err(ChimneyError::Matrix("forced failure".into()));
@@ -408,6 +424,44 @@ mod tests {
         // One delivery was attempted; the message remains for a future retry.
         assert_eq!(sink.calls(), 1);
         assert_eq!(store.len().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn reuses_a_stable_idempotency_key_across_retries() {
+        let store = MessageStore::open_in_memory().await.unwrap();
+        let id = store.enqueue(&msg("k")).await.unwrap();
+        // Fail once, then succeed; zero backoff for an immediate retry.
+        let sink = FakeSink::failing_first(1);
+
+        let (tx, handle) = spawn_worker(store.clone(), sink.clone(), 5, 0, false);
+        wait_for_len(&store, 0).await;
+        tx.send(true).unwrap();
+        handle.await.unwrap();
+
+        let keys = sink.keys();
+        assert_eq!(keys.len(), 2, "one failed attempt plus one success");
+        assert_eq!(keys[0], keys[1], "the retry must reuse the same key");
+        assert_eq!(keys[0], format!("chimney-post-{id}"));
+    }
+
+    #[tokio::test]
+    async fn distinct_messages_get_distinct_idempotency_keys() {
+        let store = MessageStore::open_in_memory().await.unwrap();
+        let id1 = store.enqueue(&msg("a")).await.unwrap();
+        let id2 = store.enqueue(&msg("b")).await.unwrap();
+        let sink = FakeSink::default();
+
+        let (tx, handle) = spawn_worker(store.clone(), sink.clone(), 5, 60, false);
+        wait_for_len(&store, 0).await;
+        tx.send(true).unwrap();
+        handle.await.unwrap();
+
+        let mut keys = sink.keys();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![format!("chimney-post-{id1}"), format!("chimney-post-{id2}")]
+        );
     }
 
     #[tokio::test]
