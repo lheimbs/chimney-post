@@ -47,6 +47,7 @@ fn test_config(bind: &str, max_message_size: usize) -> Config {
             max_retries: 5,
             retry_backoff: 60,
             db_path: ":memory:".to_string(),
+            max_len: 0,
         },
     }
 }
@@ -83,7 +84,9 @@ async fn start_test_server(
     let mut config = config;
     config.smtp.bind = bind.clone();
     let config = Arc::new(config);
-    let store = MessageStore::open(":memory:").await.unwrap();
+    let store = MessageStore::open_with_max_len(":memory:", config.queue.max_len)
+        .await
+        .unwrap();
     let handle = tokio::spawn(start_smtp_server(config, store.clone()));
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     (bind, store, handle)
@@ -199,6 +202,48 @@ async fn smtp_returns_552_on_oversized_message() {
     assert!(resp.starts_with("552"), "Expected 552, got: {resp}");
 
     server_handle.abort();
+}
+
+#[tokio::test]
+async fn smtp_returns_451_when_queue_is_full() {
+    let mut cfg = test_config("127.0.0.1:0", 10240);
+    cfg.queue.max_len = 1;
+    let (bind, _store, server_handle) = start_test_server(cfg).await;
+
+    let stream = TcpStream::connect(&bind).await.unwrap();
+    let (read_half, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    read_response(&mut reader).await; // greeting
+
+    // First message fills the single queue slot.
+    let resp1 = submit_message(&mut reader, &mut writer, "one").await;
+    assert!(resp1.starts_with("250"), "Expected 250, got: {resp1}");
+
+    // Second message must be rejected with a temporary failure (451).
+    let resp2 = submit_message(&mut reader, &mut writer, "two").await;
+    assert!(resp2.starts_with("451"), "Expected 451, got: {resp2}");
+
+    server_handle.abort();
+}
+
+/// Run one MAIL/RCPT/DATA cycle, returning the final response after the message
+/// body. Assumes the greeting has already been consumed.
+async fn submit_message(
+    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    body: &str,
+) -> String {
+    writer.write_all(b"MAIL FROM:<a@b.com>\r\n").await.unwrap();
+    read_response(reader).await;
+    writer.write_all(b"RCPT TO:<c@d.com>\r\n").await.unwrap();
+    read_response(reader).await;
+    writer.write_all(b"DATA\r\n").await.unwrap();
+    read_response(reader).await; // 354
+    writer
+        .write_all(format!("Subject: {body}\r\n\r\n{body}\r\n.\r\n").as_bytes())
+        .await
+        .unwrap();
+    read_response(reader).await
 }
 
 #[tokio::test]

@@ -50,13 +50,22 @@ CREATE INDEX IF NOT EXISTS idx_outbox_ready ON outbox(next_attempt_at, id);
 pub struct MessageStore {
     conn: Arc<Mutex<Connection>>,
     notify: Arc<Notify>,
+    /// Maximum number of messages allowed in the outbox; 0 means unlimited.
+    max_len: usize,
 }
 
 impl MessageStore {
     /// Open (creating if needed) the outbox database at `path`, running
     /// migrations. Parent directories are created automatically. Pass
     /// `":memory:"` for an ephemeral in-process database (used by tests).
+    /// The outbox is unbounded; use [`open_with_max_len`] to cap it.
     pub async fn open(path: &str) -> Result<Self> {
+        Self::open_with_max_len(path, 0).await
+    }
+
+    /// Like [`open`], but reject `enqueue` with [`ChimneyError::QueueFull`] once
+    /// the outbox holds `max_len` messages (`0` means unlimited).
+    pub async fn open_with_max_len(path: &str, max_len: usize) -> Result<Self> {
         let path = path.to_string();
         let conn = tokio::task::spawn_blocking(move || -> Result<Connection> {
             if path != ":memory:" {
@@ -76,6 +85,7 @@ impl MessageStore {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             notify: Arc::new(Notify::new()),
+            max_len,
         })
     }
 
@@ -94,9 +104,19 @@ impl MessageStore {
         let subject = message.subject.clone();
         let body = message.body.clone();
         let created_at = unix_now();
+        let max_len = self.max_len;
 
         let id = self
             .with_conn(move |conn| {
+                // Enforce the cap and insert under the same connection lock so the
+                // count cannot race with a concurrent enqueue.
+                if max_len > 0 {
+                    let count: i64 =
+                        conn.query_row("SELECT COUNT(*) FROM outbox", [], |row| row.get(0))?;
+                    if count as usize >= max_len {
+                        return Err(ChimneyError::QueueFull);
+                    }
+                }
                 conn.execute(
                     "INSERT INTO outbox (from_addr, to_addrs, subject, body, attempts, next_attempt_at, created_at)
                      VALUES (?1, ?2, ?3, ?4, 0, 0, ?5)",
@@ -359,6 +379,49 @@ mod tests {
         let store = MessageStore::open(path.to_str().unwrap()).await.unwrap();
         store.enqueue(&msg("x", &["a@x.com"])).await.unwrap();
         assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn enqueue_rejects_when_at_max_len() {
+        let store = MessageStore::open_with_max_len(":memory:", 2)
+            .await
+            .unwrap();
+        store.enqueue(&msg("a", &["x@x.com"])).await.unwrap();
+        store.enqueue(&msg("b", &["x@x.com"])).await.unwrap();
+
+        let err = store.enqueue(&msg("c", &["x@x.com"])).await.unwrap_err();
+        assert!(matches!(err, ChimneyError::QueueFull));
+        assert_eq!(store.len().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn removing_a_message_frees_a_slot() {
+        let store = MessageStore::open_with_max_len(":memory:", 1)
+            .await
+            .unwrap();
+        let id = store.enqueue(&msg("a", &["x@x.com"])).await.unwrap();
+        assert!(matches!(
+            store.enqueue(&msg("b", &["x@x.com"])).await.unwrap_err(),
+            ChimneyError::QueueFull
+        ));
+
+        store.mark_delivered(id).await.unwrap();
+        store.enqueue(&msg("b", &["x@x.com"])).await.unwrap();
+        assert_eq!(store.len().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn max_len_zero_means_unlimited() {
+        let store = MessageStore::open_with_max_len(":memory:", 0)
+            .await
+            .unwrap();
+        for i in 0..50 {
+            store
+                .enqueue(&msg(&format!("m{i}"), &["x@x.com"]))
+                .await
+                .unwrap();
+        }
+        assert_eq!(store.len().await.unwrap(), 50);
     }
 
     #[test]

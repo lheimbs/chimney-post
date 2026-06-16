@@ -105,10 +105,20 @@ pub struct QueueConfig {
     /// Path to the persistent SQLite outbox database.
     #[serde(default = "default_queue_db_path")]
     pub db_path: String,
+    /// Maximum number of messages held in the outbox before new mail is
+    /// rejected with a temporary SMTP error (451), applying backpressure so the
+    /// queue cannot grow without bound (e.g. while Matrix is unreachable).
+    /// 0 means unlimited.
+    #[serde(default = "default_queue_max_len")]
+    pub max_len: usize,
 }
 
 fn default_queue_db_path() -> String {
     "/var/lib/chimney-post/queue.db".to_string()
+}
+
+fn default_queue_max_len() -> usize {
+    10_000
 }
 
 impl Config {
@@ -319,6 +329,7 @@ mod tests {
                 max_retries: 5,
                 retry_backoff: 60,
                 db_path: "/tmp/queue.db".to_string(),
+                max_len: 0,
             },
         };
 

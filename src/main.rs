@@ -22,7 +22,8 @@ async fn main() -> Result<()> {
 
     let config = Arc::new(config);
 
-    let store = MessageStore::open(&config.queue.db_path).await?;
+    let store =
+        MessageStore::open_with_max_len(&config.queue.db_path, config.queue.max_len).await?;
     let matrix = MatrixClient::connect(config.as_ref()).await?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);

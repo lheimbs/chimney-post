@@ -31,6 +31,9 @@ pub enum ChimneyError {
     #[error("Queue error: {0}")]
     Queue(String),
 
+    #[error("queue is full")]
+    QueueFull,
+
     #[error("Storage error: {0}")]
     Storage(#[from] rusqlite::Error),
 }
