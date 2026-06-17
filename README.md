@@ -219,6 +219,8 @@ sudo systemctl enable --now chimney-post
 
 The service unit runs with `DynamicUser=yes` and an extensive sandbox: read-only root, private `/tmp` and `/dev`, dropped capabilities, kernel/`/proc` protections, a `@system-service` syscall allow-list, and a restricted set of address families (`systemd-analyze security` rates it ~1.3 "OK"). State data (the E2EE key store and the SQLite queue) is kept under `/var/lib/chimney-post`.
 
+The unit uses `Type=notify`: the service reports **ready** as soon as the SMTP listener is up (so `systemctl start` doesn't block on Matrix), publishes a live `STATUS=` line you can see with `systemctl status` (Matrix connection state + queue/dead-letter depth), and pings the systemd watchdog (`WatchdogSec=120`) so a hung runtime is auto-restarted. It also logs a `warn` when it is queuing mail without a Matrix connection and when messages reach the dead-letter table, so a silent delivery outage is visible in `journalctl`. To be alerted, wire those to your monitoring, e.g. a journald match or an `OnFailure=` mailer unit.
+
 Two directives are the most likely to need adjustment for your host and are commented as such in the unit: `MemoryDenyWriteExecute=yes` and `PrivateUsers=yes` — if the service fails to start, remove these first and check `journalctl -u chimney-post` for "Operation not permitted". If you bind to a port below 1024, you must also grant `CAP_NET_BIND_SERVICE` (see the comment in the unit). `IPAddressDeny` is intentionally not set because the service needs egress to an arbitrary homeserver IP and ingress from your LAN — restrict the SMTP port with a host firewall instead.
 
 Set secrets in a systemd environment file or drop-in override:

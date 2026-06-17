@@ -307,6 +307,20 @@ async fn smtp_closes_session_exceeding_max_duration() {
 }
 
 #[tokio::test]
+async fn bind_smtp_rejects_an_invalid_address() {
+    let cfg = test_config("not-a-socket-address", 1024);
+    assert!(chimney_post::smtp::bind_smtp(&cfg).await.is_err());
+}
+
+#[tokio::test]
+async fn bind_smtp_succeeds_on_a_valid_address() {
+    let cfg = test_config("127.0.0.1:0", 1024);
+    let listener = chimney_post::smtp::bind_smtp(&cfg).await.unwrap();
+    // A real ephemeral port was assigned.
+    assert!(listener.local_addr().unwrap().port() > 0);
+}
+
+#[tokio::test]
 async fn smtp_discards_truncated_data_on_premature_disconnect() {
     let (bind, store, server_handle) = start_test_server(test_config("127.0.0.1:0", 10240)).await;
 

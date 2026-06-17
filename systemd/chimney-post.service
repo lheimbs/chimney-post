@@ -8,10 +8,15 @@ StartLimitIntervalSec=60
 StartLimitBurst=5
 
 [Service]
-Type=simple
+# notify: the process signals READY=1 once the SMTP listener is up, sends
+# STATUS= (queue depth / Matrix connection state), and pings the watchdog.
+Type=notify
 ExecStart=/usr/local/bin/chimney-post
 Restart=on-failure
 RestartSec=5
+# Restart the service if it stops pinging the watchdog (e.g. a hung runtime).
+# The app pings every 60s, so keep this >= 120s.
+WatchdogSec=120
 # Provide MATRIX_PASSWORD / MATRIX_ACCESS_TOKEN here (file mode 0600), e.g.:
 #   EnvironmentFile=/etc/chimney-post/chimney-post.env
 Environment=CHIMNEY_CONFIG=/etc/chimney-post/config.toml

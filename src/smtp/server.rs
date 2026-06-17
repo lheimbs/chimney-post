@@ -15,15 +15,31 @@ use tracing::{info, warn};
 /// but still bound it so a client cannot exhaust memory with one endless line.
 const MAX_COMMAND_LINE_BYTES: usize = 4096;
 
-pub async fn start_smtp_server(config: Arc<Config>, store: MessageStore) -> Result<()> {
+/// Bind the SMTP listener. Separated from [`serve_smtp`] so callers can treat a
+/// successful bind as the service's readiness point (it can accept and queue
+/// mail) independently of whether Matrix has connected yet.
+pub async fn bind_smtp(config: &Config) -> Result<TcpListener> {
     let bind_addr: SocketAddr =
         config.smtp.bind.parse().map_err(|_| {
             ChimneyError::Config("smtp.bind must be a valid SocketAddr".to_string())
         })?;
-
     let listener = TcpListener::bind(bind_addr).await?;
     info!(bind = %bind_addr, "SMTP server listening");
+    Ok(listener)
+}
 
+/// Bind and serve in one call (used by tests).
+pub async fn start_smtp_server(config: Arc<Config>, store: MessageStore) -> Result<()> {
+    let listener = bind_smtp(&config).await?;
+    serve_smtp(listener, config, store).await
+}
+
+/// Accept and handle SMTP connections on an already-bound `listener`.
+pub async fn serve_smtp(
+    listener: TcpListener,
+    config: Arc<Config>,
+    store: MessageStore,
+) -> Result<()> {
     let connection_limiter = Arc::new(Semaphore::new(config.smtp.max_connections.max(1)));
 
     loop {

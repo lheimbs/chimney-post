@@ -17,6 +17,7 @@ matrix-sdk = { version = "0.16.0", features = ["e2e-encryption", "sqlite"] }
 url = "2.5.7"
 minijinja = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
+sd-notify = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "io-util", "net", "time"] }
