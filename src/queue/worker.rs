@@ -162,13 +162,21 @@ impl<S: MessageSink> DeliveryWorker<S> {
     }
 }
 
-/// Obtain a [`MessageSink`] via `connect` (retrying on failure) and then run a
-/// [`DeliveryWorker`] against `store`, until `shutdown` is set.
+/// Obtain a [`MessageSink`] via `connect` (retrying the *initial* connect on
+/// failure) and then run a [`DeliveryWorker`] against `store`, until `shutdown`
+/// is set.
 ///
 /// This lets the SMTP server start accepting and queuing mail immediately while
 /// the connection to the sink (the Matrix homeserver) is established in the
 /// background: queued messages are delivered once it connects, and a connect
 /// failure is retried rather than crashing the process.
+///
+/// Scope of "reconnect": this retries until the first successful connect. Once
+/// connected, the sink lives for the rest of the run. Transient network drops
+/// self-heal because each delivery is an independent HTTP request (a failed
+/// send is just rescheduled and succeeds when the network returns), but a
+/// session-level failure (e.g. the access token is revoked) is not recovered
+/// here -- those sends keep failing until the process is restarted.
 pub async fn run_with_reconnect<S, C, F>(
     store: MessageStore,
     mut connect: C,
