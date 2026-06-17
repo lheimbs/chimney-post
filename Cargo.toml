@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "Local-only SMTP server forwarding email to Matrix with E2EE"
-rust-version = "1.74"
+rust-version = "1.88"
 
 [dependencies]
 tokio = { version = "1.49.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time", "io-util"] }

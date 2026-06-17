@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://github.com/lheimbs/chimney-post/actions/workflows/ci.yml"><img src="https://github.com/lheimbs/chimney-post/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/lheimbs/chimney-post/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
-  <img src="https://img.shields.io/badge/rust-1.74%2B-orange" alt="Minimum Rust version: 1.74">
+  <img src="https://img.shields.io/badge/rust-1.88%2B-orange" alt="Minimum Rust version: 1.88">
 </p>
 
 ---
@@ -65,7 +65,7 @@ This is essentially a super narrow version of [mailrise](https://github.com/YoRy
 
 ### Prerequisites
 
-- Rust 1.74 or later (install via [rustup](https://rustup.rs/))
+- Rust 1.88 or later (install via [rustup](https://rustup.rs/))
 - A Matrix account for the bot
 - A Matrix room where the bot should post (invite the bot user to the room)
 
