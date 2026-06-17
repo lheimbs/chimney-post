@@ -166,7 +166,7 @@ Provide **either** the password **or** the access_token + device_id pair:
 
 | Key             | Default                          | Description                                                              |
 |-----------------|----------------------------------|--------------------------------------------------------------------------|
-| `max_retries`   | `5`                              | Maximum retries after the initial attempt before a message is dropped.   |
+| `max_retries`   | `5`                              | Maximum retries after the initial attempt before a message is moved to the dead-letter table. |
 | `retry_backoff` | `60`                             | Base backoff interval in seconds (doubles each retry, capped at 900s).   |
 | `db_path`       | `/var/lib/chimney-post/queue.db` | Path to the persistent SQLite outbox; must be writable by the service.   |
 | `max_len`       | `10000`                          | Max queued messages before new mail is refused with `451`. `0` = unlimited. |
