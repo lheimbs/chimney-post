@@ -227,7 +227,7 @@ impl Config {
                 .credentials
                 .device_id
                 .as_deref()
-                .map_or(true, |value| value.trim().is_empty())
+                .is_none_or(|value| value.trim().is_empty())
             {
                 return Err(ChimneyError::Config(
                     "matrix.credentials.device_id is required when using access_token".to_string(),
