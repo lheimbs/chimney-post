@@ -14,7 +14,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned to 1.93: Rust 1.94+ clippy overflows the query depth limit while
+      # computing the layout of matrix-sdk's huge `Client::sync()` future
+      # ("queries overflow the depth limit!"). It's a regression in the
+      # dependency's generated code that we can't edit. Revisit when a newer
+      # matrix-sdk or clippy fixes it.
+      - uses: dtolnay/rust-toolchain@1.93
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
