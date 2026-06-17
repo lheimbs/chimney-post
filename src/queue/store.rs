@@ -170,20 +170,23 @@ impl MessageStore {
 
     /// Move a message that has exhausted its retries out of the active outbox
     /// into the `dead_letter` table (recording the last error), so a permanently
-    /// undeliverable alert is retained for inspection rather than lost. Both
-    /// statements run under the same connection lock.
+    /// undeliverable alert is retained for inspection rather than lost. The
+    /// insert and delete run in a single transaction so a crash between them
+    /// cannot leave the message in both tables.
     pub async fn dead_letter(&self, id: i64, last_error: &str) -> Result<()> {
         let last_error = last_error.to_string();
         let failed_at = unix_now();
         self.with_conn(move |conn| {
-            conn.execute(
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
                 "INSERT INTO dead_letter
                      (from_addr, to_addrs, subject, body, attempts, created_at, failed_at, last_error)
                  SELECT from_addr, to_addrs, subject, body, attempts, created_at, ?2, ?3
                  FROM outbox WHERE id = ?1",
                 params![id, failed_at, last_error],
             )?;
-            conn.execute("DELETE FROM outbox WHERE id = ?1", params![id])?;
+            tx.execute("DELETE FROM outbox WHERE id = ?1", params![id])?;
+            tx.commit()?;
             Ok(())
         })
         .await
@@ -477,6 +480,18 @@ mod tests {
         assert_eq!(store.dead_letter_len().await.unwrap(), 1);
         // It is no longer deliverable from the active queue.
         assert!(store.claim_next_ready(unix_now()).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn dead_letter_on_unknown_id_is_a_noop() {
+        let store = MessageStore::open_in_memory().await.unwrap();
+        store.enqueue(&msg("keep", &["x@x.com"])).await.unwrap();
+
+        // No such row: the transaction inserts nothing and deletes nothing.
+        store.dead_letter(999, "no such row").await.unwrap();
+
+        assert_eq!(store.len().await.unwrap(), 1);
+        assert_eq!(store.dead_letter_len().await.unwrap(), 0);
     }
 
     #[tokio::test]
