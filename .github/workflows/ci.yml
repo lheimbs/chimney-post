@@ -30,3 +30,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Enforce the declared minimum supported Rust version.
       - run: cargo check --all-targets
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@cargo-audit
+      # Fails on known security vulnerabilities in the dependency tree.
+      - run: cargo audit
