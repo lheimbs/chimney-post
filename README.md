@@ -234,6 +234,61 @@ sudo systemctl edit chimney-post
 Environment=MATRIX_PASSWORD=your-secret
 ```
 
+## Sending Mail from Local Tools (`mailx`, cron, apticron, ...)
+
+Most tools that "send mail" -- `mailx`, `cron`, `apticron`, `rkhunter`, `logwatch`, etc. -- do not speak SMTP. They shell out to the `/usr/sbin/sendmail` binary interface and expect a local MTA to be installed. Chimney Post is an SMTP server, not a `sendmail` provider, so you bridge the two with a tiny send-only MTA that accepts mail on the `sendmail` interface and relays it over SMTP to Chimney Post's localhost listener.
+
+```txt
+mailx / cron  ──>  /usr/sbin/sendmail  ──>  SMTP 127.0.0.1:2525  ──>  Chimney Post  ──>  Matrix
+                   (msmtp)
+```
+
+### Recommended: `msmtp` (Debian/Ubuntu)
+
+`msmtp` is the lightest option: no daemon, no spool, a single binary. The `msmtp-mta` package installs the `/usr/sbin/sendmail` symlink that mailx and cron expect.
+
+```bash
+sudo apt install msmtp msmtp-mta bsd-mailx
+```
+
+`/etc/msmtprc`:
+
+```ini
+defaults
+auth   off
+tls    off
+syslog on
+
+account chimney
+host    127.0.0.1
+port    2525
+from    %U@%H        # e.g. root@myserver -- Chimney Post reads this as the From header
+
+account default : chimney
+```
+
+`auth off` and `tls off` are correct here: Chimney Post's SMTP listener is plaintext, unauthenticated, and bound to localhost only. Adjust `port` if you changed `[smtp].bind`. Test it:
+
+```bash
+echo "test body" | mail -s "test subject" alerts@localhost
+```
+
+The recipient address is effectively a placeholder -- Chimney Post forwards everything to your one configured room.
+
+### Trade-off: synchronous send vs. local queue
+
+`msmtp` sends synchronously and does **not** queue. If Chimney Post is momentarily unreachable (e.g. mid-restart) when a job fires, that submission fails and the local tool sees an error. In practice this is rare: Chimney Post binds localhost and starts accepting and queuing mail immediately on boot -- before the Matrix connection is even up -- so the listener is almost always reachable, and its own durable SQLite outbox owns the reliability that actually matters (the flaky Matrix hop).
+
+If you want a second layer of durability across Chimney Post restarts, use a queuing relay instead of `msmtp`:
+
+| Option       | Daemon | Local queue | Notes                                            |
+|--------------|--------|-------------|--------------------------------------------------|
+| **msmtp**    | no     | no          | Simplest; fine given Chimney Post's own queue.   |
+| **nullmailer** | yes  | yes         | Tiny; spools locally and retries to the relay.   |
+| **dma**      | no     | yes         | Queues; flushes on submission and via cron.      |
+
+Start with `msmtp`; reach for `nullmailer` only if you actually observe mail lost during restarts.
+
 ## Development
 
 ### Build and Test
