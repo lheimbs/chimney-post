@@ -263,6 +263,9 @@ impl MessageStore {
             // Recover from a poisoned mutex rather than propagating the panic:
             // the SQLite connection is still usable, so one panicking operation
             // must not permanently wedge every future enqueue and delivery.
+            // NOTE: the release profile sets panic = "abort", so a panic here
+            // aborts the process before the mutex can actually poison; this
+            // recovery only takes effect under an unwinding profile (debug/tests).
             let guard = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             f(&guard)
         })
