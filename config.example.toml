@@ -18,7 +18,9 @@ homeserver = "https://matrix.org"
 user_id = "@bot:example.com"
 # Device display name
 device_name = "chimney-post"
-# Room ID to send messages to
+# Default room ID. Emails that match no routing rule (see [[matrix.routes]]
+# below) are sent here, so this is also the only room needed when no rules
+# are configured.
 room_id = "!roomid:example.com"
 # Store path for E2EE keys (secure this!)
 store_path = "/var/lib/chimney-post/matrix-store"
@@ -50,6 +52,31 @@ store_path = "/var/lib/chimney-post/matrix-store"
 # {%- else %}
 # (empty message body)
 # {%- endif %}"""
+
+# Optional room-routing rules (like mailrise, but for Matrix rooms). Each rule
+# selects emails by recipient (`to`, matched against any SMTP RCPT TO) and/or
+# sender (`from`, matched against the SMTP MAIL FROM) and sends them to its own
+# room. Matching is case-insensitive. Rules are evaluated top to bottom and the
+# first match wins; emails matching no rule fall back to `room_id` above.
+#
+# Each rule must set `room_id` and at least one of `to` / `from`. When both are
+# set, BOTH must match (logical AND).
+#
+# [[matrix.routes]]
+# # Anything addressed to alerts@chimney -> the alerts room.
+# to = "alerts@chimney"
+# room_id = "!alerts:example.com"
+#
+# [[matrix.routes]]
+# # Anything sent by Nextcloud -> the Nextcloud room.
+# from = "nextcloud@server.example.com"
+# room_id = "!nextcloud:example.com"
+#
+# [[matrix.routes]]
+# # Only cron mail addressed to ops@chimney -> the ops room.
+# to = "ops@chimney"
+# from = "root@server.example.com"
+# room_id = "!ops:example.com"
 
 [matrix.credentials]
 # Password (prefer environment variable)
