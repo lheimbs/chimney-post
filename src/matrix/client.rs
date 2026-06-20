@@ -12,13 +12,12 @@ use matrix_sdk::ruma::{OwnedTransactionId, OwnedUserId};
 use matrix_sdk::Client;
 use matrix_sdk::SessionMeta;
 use std::path::Path;
-use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 #[derive(Clone)]
 pub struct MatrixClient {
     client: Client,
-    router: Arc<Router>,
+    router: Router,
     user_id: OwnedUserId,
     require_e2ee: bool,
     message_template: String,
@@ -275,7 +274,7 @@ impl MatrixClient {
 
         Ok(Self {
             client,
-            router: Arc::new(router),
+            router,
             user_id,
             require_e2ee: config.matrix.require_e2ee,
             message_template: config.matrix.message_template.clone(),

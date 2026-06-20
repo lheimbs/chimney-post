@@ -11,7 +11,7 @@ use crate::queue::Message;
 use matrix_sdk::ruma::OwnedRoomId;
 
 /// A routing rule with its target room already parsed and validated.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct CompiledRoute {
     /// Recipient address to match against any `RCPT TO` (case-insensitive).
     to: Option<String>,
@@ -21,16 +21,14 @@ struct CompiledRoute {
 }
 
 impl CompiledRoute {
-    /// True when this rule selects `message`. A set `from` must equal the
-    /// message sender; a set `to` must equal at least one message recipient;
-    /// when both are set, both conditions must hold (logical AND). A rule with
-    /// neither selector never matches (config validation rejects such rules, so
-    /// this is purely defensive).
     fn matches(&self, message: &Message) -> bool {
         if let Some(want_from) = &self.from {
-            match message.from.as_deref() {
-                Some(from) if from.eq_ignore_ascii_case(want_from) => {}
-                _ => return false,
+            if !message
+                .from
+                .as_deref()
+                .is_some_and(|f| f.eq_ignore_ascii_case(want_from))
+            {
+                return false;
             }
         }
         if let Some(want_to) = &self.to {
@@ -42,13 +40,13 @@ impl CompiledRoute {
                 return false;
             }
         }
-        self.to.is_some() || self.from.is_some()
+        true
     }
 }
 
 /// Resolves the destination room for a message from an ordered list of routing
 /// rules, falling back to a default room when nothing matches.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Router {
     routes: Vec<CompiledRoute>,
     default_room_id: OwnedRoomId,
