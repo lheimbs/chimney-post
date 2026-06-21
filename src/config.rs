@@ -61,7 +61,27 @@ pub struct MatrixConfig {
     pub require_e2ee: bool,
     #[serde(default = "default_message_template")]
     pub message_template: String,
+    /// Optional room-routing rules, evaluated top to bottom. The first rule that
+    /// matches an email's sender (`MAIL FROM`) and/or recipient (`RCPT TO`)
+    /// decides the destination room; if none match, `room_id` is used as the
+    /// catch-all. An empty list (the default) sends every email to `room_id`.
+    #[serde(default)]
+    pub routes: Vec<RouteConfig>,
     pub credentials: MatrixCredentials,
+}
+
+/// A single room-routing rule. At least one of `to`/`from` must be set; when
+/// both are set, both must match (logical AND). Matching is case-insensitive.
+#[derive(Clone, Debug, Deserialize)]
+pub struct RouteConfig {
+    /// Match when any recipient address (`RCPT TO`) equals this value.
+    #[serde(default)]
+    pub to: Option<String>,
+    /// Match when the sender address (`MAIL FROM`) equals this value.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// Destination room for emails matched by this rule.
+    pub room_id: String,
 }
 
 fn default_require_e2ee() -> bool {
@@ -199,6 +219,29 @@ impl Config {
             ));
         }
 
+        // Routing rules are also validated (and room ids parsed) in
+        // Router::build() at connect time, but that runs in the background
+        // delivery worker -- after the SMTP listener is up and the service has
+        // signalled readiness. Re-check the structural rules here so a malformed
+        // route fails `Config::load` synchronously at startup, rather than being
+        // silently accepted and then surfacing later as an endless connect-retry
+        // loop. (Do not "deduplicate" by dropping this: the two checks run at
+        // different times and serve different purposes.)
+        for (idx, route) in self.matrix.routes.iter().enumerate() {
+            let has_to = route.to.as_deref().is_some_and(|value| !is_blank(value));
+            let has_from = route.from.as_deref().is_some_and(|value| !is_blank(value));
+            if !has_to && !has_from {
+                return Err(ChimneyError::Config(format!(
+                    "matrix.routes[{idx}] must set at least one of `to` or `from`"
+                )));
+            }
+            if is_blank(&route.room_id) {
+                return Err(ChimneyError::Config(format!(
+                    "matrix.routes[{idx}].room_id must not be empty"
+                )));
+            }
+        }
+
         if self.matrix.credentials.password.is_none()
             && self.matrix.credentials.access_token.is_none()
         {
@@ -323,6 +366,7 @@ mod tests {
                 store_path: "/tmp/matrix".to_string(),
                 require_e2ee: true,
                 message_template: "{{ unclosed".to_string(),
+                routes: Vec::new(),
                 credentials: MatrixCredentials {
                     password: Some("test".to_string()),
                     access_token: None,
@@ -357,6 +401,64 @@ mod tests {
         config.queue.retry_backoff = 0;
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("retry_backoff"));
+    }
+
+    #[test]
+    fn validate_rejects_route_without_to_or_from() {
+        // Selectors are also enforced in Router::build(), but that runs in the
+        // background worker; validate() must reject it at load so startup fails
+        // fast instead of looping on connect.
+        let mut config = valid_config();
+        config.matrix.routes = vec![RouteConfig {
+            to: None,
+            from: None,
+            room_id: "!room:example.org".to_string(),
+        }];
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("at least one of"));
+    }
+
+    #[test]
+    fn validate_treats_blank_to_or_from_as_unset() {
+        // Whitespace-only selectors must not satisfy the "at least one" rule.
+        let mut config = valid_config();
+        config.matrix.routes = vec![RouteConfig {
+            to: Some("   ".to_string()),
+            from: Some(String::new()),
+            room_id: "!room:example.org".to_string(),
+        }];
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("at least one of"));
+    }
+
+    #[test]
+    fn validate_rejects_route_with_blank_room_id() {
+        let mut config = valid_config();
+        config.matrix.routes = vec![RouteConfig {
+            to: Some("alerts@chimney".to_string()),
+            from: None,
+            room_id: "  ".to_string(),
+        }];
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("room_id"));
+    }
+
+    #[test]
+    fn validate_accepts_well_formed_routes() {
+        let mut config = valid_config();
+        config.matrix.routes = vec![
+            RouteConfig {
+                to: Some("alerts@chimney".to_string()),
+                from: None,
+                room_id: "!alerts:example.org".to_string(),
+            },
+            RouteConfig {
+                to: None,
+                from: Some("nextcloud@server".to_string()),
+                room_id: "!nextcloud:example.org".to_string(),
+            },
+        ];
+        assert!(config.validate().is_ok());
     }
 
     #[test]
