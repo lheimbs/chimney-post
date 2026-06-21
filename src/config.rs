@@ -219,10 +219,22 @@ impl Config {
             ));
         }
 
-        // Check that each route has a room to target. Selector validity (at
-        // least one of `to`/`from` is set) and room-id syntax are both
-        // validated in Router::build() at connect time.
+        // Routing rules are also validated (and room ids parsed) in
+        // Router::build() at connect time, but that runs in the background
+        // delivery worker -- after the SMTP listener is up and the service has
+        // signalled readiness. Re-check the structural rules here so a malformed
+        // route fails `Config::load` synchronously at startup, rather than being
+        // silently accepted and then surfacing later as an endless connect-retry
+        // loop. (Do not "deduplicate" by dropping this: the two checks run at
+        // different times and serve different purposes.)
         for (idx, route) in self.matrix.routes.iter().enumerate() {
+            let has_to = route.to.as_deref().is_some_and(|value| !is_blank(value));
+            let has_from = route.from.as_deref().is_some_and(|value| !is_blank(value));
+            if !has_to && !has_from {
+                return Err(ChimneyError::Config(format!(
+                    "matrix.routes[{idx}] must set at least one of `to` or `from`"
+                )));
+            }
             if is_blank(&route.room_id) {
                 return Err(ChimneyError::Config(format!(
                     "matrix.routes[{idx}].room_id must not be empty"
@@ -389,6 +401,34 @@ mod tests {
         config.queue.retry_backoff = 0;
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("retry_backoff"));
+    }
+
+    #[test]
+    fn validate_rejects_route_without_to_or_from() {
+        // Selectors are also enforced in Router::build(), but that runs in the
+        // background worker; validate() must reject it at load so startup fails
+        // fast instead of looping on connect.
+        let mut config = valid_config();
+        config.matrix.routes = vec![RouteConfig {
+            to: None,
+            from: None,
+            room_id: "!room:example.org".to_string(),
+        }];
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("at least one of"));
+    }
+
+    #[test]
+    fn validate_treats_blank_to_or_from_as_unset() {
+        // Whitespace-only selectors must not satisfy the "at least one" rule.
+        let mut config = valid_config();
+        config.matrix.routes = vec![RouteConfig {
+            to: Some("   ".to_string()),
+            from: Some(String::new()),
+            room_id: "!room:example.org".to_string(),
+        }];
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("at least one of"));
     }
 
     #[test]
