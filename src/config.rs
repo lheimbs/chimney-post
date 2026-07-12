@@ -1,4 +1,5 @@
 use crate::error::{ChimneyError, Result};
+use matrix_sdk::ruma::OwnedRoomId;
 use serde::Deserialize;
 use std::env;
 use std::fs;
@@ -212,6 +213,7 @@ impl Config {
                 "matrix.room_id must not be empty".to_string(),
             ));
         }
+        parse_room_id_field(&self.matrix.room_id, "matrix.room_id")?;
 
         if is_blank(&self.matrix.store_path) {
             return Err(ChimneyError::Config(
@@ -240,6 +242,7 @@ impl Config {
                     "matrix.routes[{idx}].room_id must not be empty"
                 )));
             }
+            parse_room_id_field(&route.room_id, &format!("matrix.routes[{idx}].room_id"))?;
         }
 
         if self.matrix.credentials.password.is_none()
@@ -342,6 +345,13 @@ impl Config {
 
 fn is_blank(value: &str) -> bool {
     value.trim().is_empty()
+}
+
+fn parse_room_id_field(value: &str, field: &str) -> Result<()> {
+    value
+        .parse::<OwnedRoomId>()
+        .map_err(|error| ChimneyError::Config(format!("invalid {field} ({value}): {error}")))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -459,6 +469,26 @@ mod tests {
             },
         ];
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_invalid_default_room_id() {
+        let mut config = valid_config();
+        config.matrix.room_id = "not-a-room-id".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("matrix.room_id"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_route_room_id() {
+        let mut config = valid_config();
+        config.matrix.routes = vec![RouteConfig {
+            to: Some("alerts@chimney".to_string()),
+            from: None,
+            room_id: "not-a-room-id".to_string(),
+        }];
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("matrix.routes[0].room_id"));
     }
 
     #[test]

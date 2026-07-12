@@ -370,18 +370,19 @@ fn parse_rcpt_to(line: &str) -> Option<String> {
 /// Extract the email address from after the colon in MAIL FROM: / RCPT TO: commands.
 fn extract_address_after_colon(line: &str) -> Option<String> {
     let colon_pos = line.find(':')?;
-    Some(
-        line[colon_pos + 1..]
-            .trim()
-            .trim_matches('<')
-            .trim_matches('>')
-            .to_string(),
-    )
+    let rest = line[colon_pos + 1..].trim();
+    let address = if let Some(path) = rest.strip_prefix('<') {
+        let end = path.find('>')?;
+        &path[..end]
+    } else {
+        rest.split_whitespace().next()?
+    };
+    Some(address.to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{read_data, read_line_limited};
+    use super::{parse_mail_from, parse_rcpt_to, read_data, read_line_limited};
     use crate::error::ChimneyError;
     use tokio::io::BufReader;
 
@@ -528,5 +529,22 @@ mod tests {
     async fn invalid_utf8_is_rejected() {
         let err = read_one(&[0xff, 0xfe, b'\n'], 64, 4096).await.unwrap_err();
         assert!(matches!(err, ChimneyError::Smtp(_)));
+    }
+
+    #[test]
+    fn parse_mail_from_ignores_esmtp_parameters() {
+        let parsed = parse_mail_from("MAIL FROM:<sender@example.com> SIZE=1234");
+        assert_eq!(parsed.as_deref(), Some("sender@example.com"));
+    }
+
+    #[test]
+    fn parse_rcpt_to_ignores_esmtp_parameters() {
+        let parsed = parse_rcpt_to("RCPT TO:<alerts@chimney> NOTIFY=SUCCESS");
+        assert_eq!(parsed.as_deref(), Some("alerts@chimney"));
+    }
+
+    #[test]
+    fn parse_mail_from_rejects_unterminated_path() {
+        assert_eq!(parse_mail_from("MAIL FROM:<sender@example.com"), None);
     }
 }
