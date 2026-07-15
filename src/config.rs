@@ -1,5 +1,6 @@
 use crate::error::{ChimneyError, Result};
-use matrix_sdk::ruma::OwnedRoomId;
+use crate::matrix::Router;
+use matrix_sdk::ruma::OwnedUserId;
 use serde::Deserialize;
 use std::env;
 use std::fs;
@@ -207,13 +208,14 @@ impl Config {
                 "matrix.user_id must not be empty".to_string(),
             ));
         }
-
-        if is_blank(&self.matrix.room_id) {
-            return Err(ChimneyError::Config(
-                "matrix.room_id must not be empty".to_string(),
-            ));
-        }
-        parse_room_id_field(&self.matrix.room_id, "matrix.room_id")?;
+        // Parsed here too (not just at connect time in MatrixClient::connect),
+        // so a malformed user_id fails `Config::load` synchronously at startup
+        // instead of passing readiness and looping forever in the background
+        // delivery worker's connect retries.
+        self.matrix
+            .user_id
+            .parse::<OwnedUserId>()
+            .map_err(|error| ChimneyError::Config(format!("invalid matrix.user_id: {error}")))?;
 
         if is_blank(&self.matrix.store_path) {
             return Err(ChimneyError::Config(
@@ -221,29 +223,15 @@ impl Config {
             ));
         }
 
-        // Routing rules are also validated (and room ids parsed) in
-        // Router::build() at connect time, but that runs in the background
-        // delivery worker -- after the SMTP listener is up and the service has
-        // signalled readiness. Re-check the structural rules here so a malformed
-        // route fails `Config::load` synchronously at startup, rather than being
-        // silently accepted and then surfacing later as an endless connect-retry
-        // loop. (Do not "deduplicate" by dropping this: the two checks run at
-        // different times and serve different purposes.)
-        for (idx, route) in self.matrix.routes.iter().enumerate() {
-            let has_to = route.to.as_deref().is_some_and(|value| !is_blank(value));
-            let has_from = route.from.as_deref().is_some_and(|value| !is_blank(value));
-            if !has_to && !has_from {
-                return Err(ChimneyError::Config(format!(
-                    "matrix.routes[{idx}] must set at least one of `to` or `from`"
-                )));
-            }
-            if is_blank(&route.room_id) {
-                return Err(ChimneyError::Config(format!(
-                    "matrix.routes[{idx}].room_id must not be empty"
-                )));
-            }
-            parse_room_id_field(&route.room_id, &format!("matrix.routes[{idx}].room_id"))?;
-        }
+        // Router::build() parses the default room id and every route's room id,
+        // and enforces that each route sets at least one selector -- the same
+        // structural checks MatrixClient::connect() relies on at connect time,
+        // which runs in the background delivery worker after the SMTP listener
+        // is already accepting mail. Running the same builder here makes a
+        // malformed room id or selector-less route fail `Config::load`
+        // synchronously at startup instead of surfacing later as an endless
+        // connect-retry loop.
+        Router::from_config(&self.matrix).map(|_| ())?;
 
         if self.matrix.credentials.password.is_none()
             && self.matrix.credentials.access_token.is_none()
@@ -345,13 +333,6 @@ impl Config {
 
 fn is_blank(value: &str) -> bool {
     value.trim().is_empty()
-}
-
-fn parse_room_id_field(value: &str, field: &str) -> Result<()> {
-    value
-        .parse::<OwnedRoomId>()
-        .map_err(|error| ChimneyError::Config(format!("invalid {field} ({value}): {error}")))?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -489,6 +470,17 @@ mod tests {
         }];
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("matrix.routes[0].room_id"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_user_id() {
+        // Mirrors the room_id checks above: a malformed user_id must fail
+        // Config::load synchronously, not surface later as a connect-retry
+        // loop in the background delivery worker (see MatrixClient::connect).
+        let mut config = valid_config();
+        config.matrix.user_id = "not-a-user-id".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("matrix.user_id"));
     }
 
     #[test]

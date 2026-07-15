@@ -9,6 +9,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio::time::{timeout, Duration};
 use tracing::{info, warn};
+use validator::ValidateEmail;
 
 /// Maximum length of a single SMTP command line, in bytes. RFC 5321 §4.5.3.1.4
 /// mandates at least 512 octets; we allow more headroom for long EHLO/parameters
@@ -338,8 +339,10 @@ where
 }
 
 /// Validate `MAIL FROM:` syntax and extract the sender address.
-/// Returns `Some(address)` for valid commands, `None` for malformed syntax.
-/// An empty address (from `MAIL FROM:<>`) is valid per RFC 5321 (null sender for bounces).
+/// Returns `Some(address)` for valid commands, `None` for malformed syntax or
+/// an address that isn't a valid email.
+/// An empty address (from `MAIL FROM:<>`) is valid per RFC 5321 (null sender for bounces)
+/// and is exempted from email validation.
 fn parse_mail_from(line: &str) -> Option<String> {
     let upper = line.to_uppercase();
     let rest = upper.strip_prefix("MAIL")?.trim_start();
@@ -347,12 +350,17 @@ fn parse_mail_from(line: &str) -> Option<String> {
     if !rest.starts_with(':') {
         return None;
     }
-    extract_address_after_colon(line)
+    let addr = extract_address_after_colon(line)?;
+    if !addr.is_empty() && !addr.validate_email() {
+        return None;
+    }
+    Some(addr)
 }
 
 /// Validate `RCPT TO:` syntax and extract the recipient address.
-/// Returns `Some(address)` for valid commands with a non-empty recipient,
-/// `None` for malformed syntax or empty addresses.
+/// Returns `Some(address)` for valid commands with a non-empty, validly
+/// formatted recipient; `None` for malformed syntax, empty addresses, or
+/// addresses that aren't valid emails.
 fn parse_rcpt_to(line: &str) -> Option<String> {
     let upper = line.to_uppercase();
     let rest = upper.strip_prefix("RCPT")?.trim_start();
@@ -361,7 +369,7 @@ fn parse_rcpt_to(line: &str) -> Option<String> {
         return None;
     }
     let addr = extract_address_after_colon(line)?;
-    if addr.is_empty() {
+    if addr.is_empty() || !addr.validate_email() {
         return None;
     }
     Some(addr)
@@ -546,5 +554,39 @@ mod tests {
     #[test]
     fn parse_mail_from_rejects_unterminated_path() {
         assert_eq!(parse_mail_from("MAIL FROM:<sender@example.com"), None);
+    }
+
+    #[test]
+    fn parse_mail_from_accepts_null_sender() {
+        assert_eq!(parse_mail_from("MAIL FROM:<>"), Some(String::new()));
+    }
+
+    #[test]
+    fn parse_rcpt_to_accepts_single_label_domain() {
+        // Routing examples use addresses like `alerts@chimney` with no TLD;
+        // these must remain valid (HTML5 email validation doesn't require a dot).
+        assert_eq!(
+            parse_rcpt_to("RCPT TO:<alerts@chimney>").as_deref(),
+            Some("alerts@chimney")
+        );
+    }
+
+    #[test]
+    fn parse_mail_from_rejects_addresses_with_no_at_sign() {
+        assert_eq!(parse_mail_from("MAIL FROM:<not-an-email>"), None);
+    }
+
+    #[test]
+    fn parse_rcpt_to_rejects_addresses_with_no_at_sign() {
+        assert_eq!(parse_rcpt_to("RCPT TO:<not-an-email>"), None);
+    }
+
+    #[test]
+    fn parse_mail_from_rejects_quoted_local_part_containing_a_bracket() {
+        // A quoted-string local part containing '>' is legal per RFC 5321 but
+        // truncates the bracket-matching extraction; validate_email correctly
+        // classifies the (mangled) result as invalid rather than silently
+        // accepting a corrupted address.
+        assert_eq!(parse_mail_from(r#"MAIL FROM:<"a>b"@example.com>"#), None);
     }
 }
