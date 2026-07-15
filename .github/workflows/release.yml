@@ -21,12 +21,12 @@ jobs:
           - x86_64-unknown-linux-gnu
           - aarch64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
       # Pinned to 1.93 to match ci.yml: Rust 1.94+ clippy overflows the query
       # depth limit on matrix-sdk's huge `Client::sync()` future.
-      - uses: dtolnay/rust-toolchain@1.93
+      - uses: dtolnay/rust-toolchain@841e5d09118f0311af26ce5ba303c1f15b358772 # 1.93
         with:
           targets: ${{ matrix.target }}
       - name: Install aarch64 cross-compilation toolchain
@@ -40,7 +40,7 @@ jobs:
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
           echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
           echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar" >> $GITHUB_ENV
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           key: release-${{ matrix.target }}
       - name: Build
@@ -50,7 +50,7 @@ jobs:
           mkdir -p staging
           cp target/${{ matrix.target }}/release/chimney-post staging/
           tar -czf chimney-post-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C staging chimney-post
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: build-${{ matrix.target }}
           path: chimney-post-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
@@ -64,7 +64,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
           pattern: build-*
@@ -72,7 +72,7 @@ jobs:
       - name: Generate SHA256SUMS
         working-directory: artifacts
         run: sha256sum *.tar.gz > SHA256SUMS
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3
       - name: Sign artifacts with cosign (keyless)
         working-directory: artifacts
         run: |
@@ -80,12 +80,12 @@ jobs:
             cosign sign-blob --yes --bundle="$f.bundle" "$f"
           done
       - name: Generate SLSA build provenance
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@92c65d2898f1f53cfdc910b962cecff86e7f8fcc # v1
         with:
           subject-path: |
             artifacts/chimney-post-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
             artifacts/chimney-post-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.gz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: signatures
           path: |
@@ -99,19 +99,19 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
           pattern: build-*
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: signatures
           name: signatures
       - name: Stage release assets
         run: mv signatures/* artifacts/
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@c12583777ecdfd3be55c69cf75464299dc01057e # v3
         with:
           generate_release_notes: true
           files: |
