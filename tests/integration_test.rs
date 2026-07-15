@@ -33,6 +33,7 @@ fn test_config(bind: &str, max_message_size: usize) -> Config {
             store_path: "/tmp/matrix".to_string(),
             require_e2ee: true,
             message_template: DEFAULT_MESSAGE_TEMPLATE.to_string(),
+            routes: Vec::new(),
             credentials: MatrixCredentials {
                 password: Some("test".to_string()),
                 access_token: None,

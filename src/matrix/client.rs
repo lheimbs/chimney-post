@@ -1,22 +1,23 @@
 use crate::config::Config;
 use crate::error::{ChimneyError, Result};
 use crate::matrix::format_message;
+use crate::matrix::routing::Router;
 use crate::queue::{DeliveryFuture, Message, MessageSink};
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::authentication::SessionTokens;
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::encryption::CryptoStoreError;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
-use matrix_sdk::ruma::{OwnedRoomId, OwnedTransactionId, OwnedUserId};
+use matrix_sdk::ruma::{OwnedTransactionId, OwnedUserId};
 use matrix_sdk::Client;
 use matrix_sdk::SessionMeta;
 use std::path::Path;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 #[derive(Clone)]
 pub struct MatrixClient {
     client: Client,
-    room_id: OwnedRoomId,
+    router: Router,
     user_id: OwnedUserId,
     require_e2ee: bool,
     message_template: String,
@@ -120,10 +121,9 @@ impl MatrixClient {
             config.matrix.user_id.parse().map_err(|error| {
                 ChimneyError::Config(format!("invalid matrix.user_id: {error}"))
             })?;
-        let room_id: OwnedRoomId =
-            config.matrix.room_id.parse().map_err(|error| {
-                ChimneyError::Config(format!("invalid matrix.room_id: {error}"))
-            })?;
+        // Parses the default room id and every routing rule's room id up front,
+        // so a malformed room id fails the connect rather than each send.
+        let router = Router::from_config(&config.matrix)?;
 
         if let Some(access_token) = config.matrix.credentials.access_token.as_deref() {
             let device_id = config
@@ -274,33 +274,38 @@ impl MatrixClient {
 
         Ok(Self {
             client,
-            room_id,
+            router,
             user_id,
             require_e2ee: config.matrix.require_e2ee,
             message_template: config.matrix.message_template.clone(),
         })
     }
 
-    /// Send `message` to the configured room. `idempotency_key` is used as the
-    /// Matrix transaction id so that a redelivery of the same queued message
-    /// (e.g. after a lost response) is deduplicated by the homeserver within the
-    /// session rather than appearing twice.
+    /// Send `message` to its routed room (see [`Router`]). `idempotency_key` is
+    /// used as the Matrix transaction id so that a redelivery of the same queued
+    /// message (e.g. after a lost response) is deduplicated by the homeserver
+    /// within the session rather than appearing twice.
     pub async fn send_message(&self, message: &Message, idempotency_key: &str) -> Result<()> {
         let formatted = format_message(message, &self.message_template)?;
         let transaction_id = OwnedTransactionId::from(idempotency_key);
 
-        let room = match self.client.get_room(&self.room_id) {
+        // Resolve the destination room from the routing rules. Only the chosen
+        // room id is logged -- never the sender, recipients, or body.
+        let room_id = self.router.resolve(message);
+        debug!(room_id = %room_id, "routed message to destination room");
+
+        let room = match self.client.get_room(room_id) {
             Some(room) => room,
             None => {
                 self.client
-                    .join_room_by_id(&self.room_id)
+                    .join_room_by_id(room_id)
                     .await
                     .map_err(|error| {
                         ChimneyError::Matrix(format!("failed to join Matrix room: {error}"))
                     })?;
 
                 self.client
-                    .get_room(&self.room_id)
+                    .get_room(room_id)
                     .ok_or_else(|| ChimneyError::Matrix("Matrix room not found".to_string()))?
             }
         };
@@ -323,7 +328,7 @@ impl MatrixClient {
                 ));
             }
             warn!(
-                room_id = %self.room_id,
+                room_id = %room_id,
                 "sending message to unencrypted room (matrix.require_e2ee = false)"
             );
         }
@@ -336,7 +341,7 @@ impl MatrixClient {
             .map_err(|error| ChimneyError::Matrix(format!("Matrix send failed: {error}")))?;
 
         info!(
-            room_id = %self.room_id,
+            room_id = %room_id,
             user_id = %self.user_id,
             "Matrix message sent"
         );

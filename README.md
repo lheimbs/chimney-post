@@ -131,10 +131,43 @@ All settings live in a single TOML file. See `config.example.toml` for a fully a
 | `homeserver`       | --               | Matrix homeserver URL (e.g. `https://matrix.org`). |
 | `user_id`          | --               | Full Matrix user ID (`@user:server.com`).          |
 | `device_name`      | `chimney-post`   | Display name for the Matrix device.                |
-| `room_id`          | --               | Target room ID (`!room:server.com`).               |
+| `room_id`          | --               | Default/catch-all room ID (`!room:server.com`). Used for emails that match no routing rule. |
 | `store_path`       | --               | Directory for the E2EE key store (SQLite).         |
 | `require_e2ee`     | `true`           | Refuse to send if the room is not encrypted.       |
 | `message_template` | *(built-in)*     | MiniJinja template for formatting messages.        |
+| `routes`           | *(none)*         | Optional room-routing rules; see [Room routing](#room-routing). |
+
+### Room routing
+
+By default every email is delivered to `room_id`. To fan notifications out to
+different rooms, add `[[matrix.routes]]` rules that select on the email's
+recipient (`to`, matched against any SMTP `RCPT TO`) and/or sender (`from`,
+matched against the SMTP `MAIL FROM`) -- similar to how
+[mailrise](https://github.com/YoRyan/mailrise) routes on address, but targeting
+Matrix rooms:
+
+```toml
+[matrix]
+room_id = "!fallback:example.com"   # catch-all for unmatched mail
+
+[[matrix.routes]]
+to = "alerts@chimney"               # route by recipient
+room_id = "!alerts:example.com"
+
+[[matrix.routes]]
+from = "nextcloud@server.example.com"   # route by sender
+room_id = "!nextcloud:example.com"
+
+[[matrix.routes]]
+to = "ops@chimney"                  # both set => both must match
+from = "root@server.example.com"
+room_id = "!ops:example.com"
+```
+
+Rules are evaluated top to bottom and the **first match wins**. Each rule must
+set `room_id` and at least one of `to`/`from`; when both are set, both must
+match (logical AND). Matching is case-insensitive. Any email that matches no
+rule falls back to `room_id`, so mail is never dropped for lack of a route.
 
 ### `[matrix.credentials]`
 
@@ -273,7 +306,7 @@ account default : chimney
 echo "test body" | mail -s "test subject" alerts@localhost
 ```
 
-The recipient address is effectively a placeholder -- Chimney Post forwards everything to your one configured room.
+Without any `[[matrix.routes]]` rules the recipient address is just a placeholder -- Chimney Post forwards everything to your one configured `room_id`. Once you add routing rules, the recipient (and/or sender) address selects the destination room; see [Room routing](#room-routing).
 
 ### Trade-off: synchronous send vs. local queue
 
