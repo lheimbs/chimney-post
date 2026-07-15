@@ -75,11 +75,11 @@ This is essentially a super narrow version of [mailrise](https://github.com/YoRy
 Release binaries for `x86_64` and `aarch64` Linux are published on the [Releases page](https://github.com/lheimbs/chimney-post/releases).
 Each release tarball is signed with a cosign keyless signature (sigstore) and carries SLSA build provenance attested via GitHub Actions OIDC.
 
-Download a tarball and its `.bundle` sidecar, then verify the signature:
+Download a tarball and its `.bundle` sidecar, then verify the signature (replace `<version>` and `<target>` with the release version and architecture you downloaded):
 
 ```sh
-cosign verify-blob chimney-post-*.tar.gz \
-  --bundle chimney-post-*.tar.gz.bundle \
+cosign verify-blob chimney-post-<version>-<target>.tar.gz \
+  --bundle chimney-post-<version>-<target>.tar.gz.bundle \
   --certificate-identity-regexp "https://github\.com/lheimbs/chimney-post" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
 ```
@@ -87,7 +87,7 @@ cosign verify-blob chimney-post-*.tar.gz \
 To verify build provenance (requires the [GitHub CLI](https://cli.github.com/)):
 
 ```sh
-gh attestation verify chimney-post-*.tar.gz --repo lheimbs/chimney-post
+gh attestation verify chimney-post-<version>-<target>.tar.gz --repo lheimbs/chimney-post
 ```
 
 Checksums for all artifacts are in `SHA256SUMS` (also signed).

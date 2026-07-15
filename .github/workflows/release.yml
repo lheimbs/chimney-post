@@ -22,6 +22,8 @@ jobs:
           - aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       # Pinned to 1.93 to match ci.yml: Rust 1.94+ clippy overflows the query
       # depth limit on matrix-sdk's huge `Client::sync()` future.
       - uses: dtolnay/rust-toolchain@1.93
@@ -109,7 +111,7 @@ jobs:
       - name: Stage release assets
         run: mv signatures/* artifacts/
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           files: |
@@ -132,11 +134,11 @@ jobs:
             The tarballs and `SHA256SUMS` are signed with cosign keyless signatures using GitHub Actions OIDC identity.
             Signatures are recorded in the public [Rekor](https://github.com/sigstore/rekor) transparency log.
 
-            Install [cosign](https://github.com/sigstore/cosign), then verify any tarball:
+            Install [cosign](https://github.com/sigstore/cosign), then verify a tarball (replace `<target>` with `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`):
 
             ```sh
-            cosign verify-blob chimney-post-*.tar.gz \
-              --bundle chimney-post-*.tar.gz.bundle \
+            cosign verify-blob chimney-post-${{ github.ref_name }}-<target>.tar.gz \
+              --bundle chimney-post-${{ github.ref_name }}-<target>.tar.gz.bundle \
               --certificate-identity-regexp "https://github\.com/lheimbs/chimney-post" \
               --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
             ```
@@ -144,8 +146,8 @@ jobs:
             ### Build Provenance (SLSA)
 
             Build provenance attestations are stored in GitHub's native attestation store.
-            Verify with the GitHub CLI:
+            Verify with the GitHub CLI (replace `<target>`):
 
             ```sh
-            gh attestation verify chimney-post-*.tar.gz --repo lheimbs/chimney-post
+            gh attestation verify chimney-post-${{ github.ref_name }}-<target>.tar.gz --repo lheimbs/chimney-post
             ```
