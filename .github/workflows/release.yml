@@ -82,7 +82,7 @@ jobs:
             cosign sign-blob --yes --bundle="$f.bundle" "$f"
           done
       - name: Generate SLSA build provenance
-        uses: actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018 # v1
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
         with:
           subject-path: |
             artifacts/chimney-post-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
