@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/lheimbs/chimney-post/actions/workflows/ci.yml"><img src="https://github.com/lheimbs/chimney-post/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/lheimbs/chimney-post/releases"><img src="https://img.shields.io/github/v/release/lheimbs/chimney-post" alt="Latest Release"></a>
   <a href="https://github.com/lheimbs/chimney-post/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/rust-1.88%2B-orange" alt="Minimum Rust version: 1.88">
 </p>
@@ -68,6 +69,28 @@ This is essentially a super narrow version of [mailrise](https://github.com/YoRy
 - Rust 1.88 or later (install via [rustup](https://rustup.rs/))
 - A Matrix account for the bot
 - A Matrix room where the bot should post (invite the bot user to the room)
+
+### Pre-built Binaries
+
+Release binaries for `x86_64` and `aarch64` Linux are published on the [Releases page](https://github.com/lheimbs/chimney-post/releases).
+Each release tarball is signed with a cosign keyless signature (sigstore) and carries SLSA build provenance attested via GitHub Actions OIDC.
+
+Download a tarball and its `.bundle` sidecar, then verify the signature (replace `<version>` and `<target>` with the release version and architecture you downloaded):
+
+```sh
+cosign verify-blob chimney-post-<version>-<target>.tar.gz \
+  --bundle chimney-post-<version>-<target>.tar.gz.bundle \
+  --certificate-identity-regexp "https://github\.com/lheimbs/chimney-post" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+```
+
+To verify build provenance (requires the [GitHub CLI](https://cli.github.com/)):
+
+```sh
+gh attestation verify chimney-post-<version>-<target>.tar.gz --repo lheimbs/chimney-post
+```
+
+Checksums for all artifacts are in `SHA256SUMS` (also signed).
 
 ### Build
 

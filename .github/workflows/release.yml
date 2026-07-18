@@ -1,0 +1,156 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      # Pinned to 1.93 to match ci.yml: Rust 1.94+ fails `cargo build` with a
+      # query-depth overflow on matrix-sdk's huge `Client::sync()` future
+      # (matrix-org/matrix-rust-sdk#6254). Lift once this repo bumps matrix-sdk
+      # to 0.16.1+/0.17.0+, which fixed it.
+      - uses: dtolnay/rust-toolchain@841e5d09118f0311af26ce5ba303c1f15b358772 # 1.93
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install aarch64 cross-compilation toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Configure aarch64 linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar" >> $GITHUB_ENV
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/chimney-post staging/
+          tar -czf chimney-post-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C staging chimney-post
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: build-${{ matrix.target }}
+          path: chimney-post-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          retention-days: 7
+
+  sign-attest:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+          pattern: build-*
+          merge-multiple: true
+      - name: Generate SHA256SUMS
+        working-directory: artifacts
+        run: sha256sum *.tar.gz > SHA256SUMS
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - name: Sign artifacts with cosign (keyless)
+        working-directory: artifacts
+        run: |
+          for f in *.tar.gz SHA256SUMS; do
+            cosign sign-blob --yes --bundle="$f.bundle" "$f"
+          done
+      - name: Generate SLSA build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
+        with:
+          subject-path: |
+            artifacts/chimney-post-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
+            artifacts/chimney-post-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: signatures
+          path: |
+            artifacts/*.bundle
+            artifacts/SHA256SUMS
+          retention-days: 7
+
+  release:
+    needs: sign-attest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+          pattern: build-*
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: signatures
+          name: signatures
+      - name: Stage release assets
+        run: mv signatures/* artifacts/
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/*.tar.gz
+            artifacts/SHA256SUMS
+            artifacts/*.bundle
+          body: |
+            ## Verification
+
+            ### SHA256 Checksums
+
+            Download `SHA256SUMS` alongside the tarballs and verify:
+
+            ```sh
+            sha256sum -c SHA256SUMS --ignore-missing
+            ```
+
+            ### Signature (cosign / sigstore)
+
+            The tarballs and `SHA256SUMS` are signed with cosign keyless signatures using GitHub Actions OIDC identity.
+            Signatures are recorded in the public [Rekor](https://github.com/sigstore/rekor) transparency log.
+
+            Install [cosign](https://github.com/sigstore/cosign), then verify a tarball (replace `<target>` with `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`):
+
+            ```sh
+            cosign verify-blob chimney-post-${{ github.ref_name }}-<target>.tar.gz \
+              --bundle chimney-post-${{ github.ref_name }}-<target>.tar.gz.bundle \
+              --certificate-identity-regexp "https://github\.com/lheimbs/chimney-post" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+            ```
+
+            ### Build Provenance (SLSA)
+
+            Build provenance attestations are stored in GitHub's native attestation store.
+            Verify with the GitHub CLI (replace `<target>`):
+
+            ```sh
+            gh attestation verify chimney-post-${{ github.ref_name }}-<target>.tar.gz --repo lheimbs/chimney-post
+            ```
