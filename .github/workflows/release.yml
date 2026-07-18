@@ -24,8 +24,10 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
-      # Pinned to 1.93 to match ci.yml: Rust 1.94+ clippy overflows the query
-      # depth limit on matrix-sdk's huge `Client::sync()` future.
+      # Pinned to 1.93 to match ci.yml: Rust 1.94+ fails `cargo build` with a
+      # query-depth overflow on matrix-sdk's huge `Client::sync()` future
+      # (matrix-org/matrix-rust-sdk#6254). Lift once this repo bumps matrix-sdk
+      # to 0.16.1+/0.17.0+, which fixed it.
       - uses: dtolnay/rust-toolchain@841e5d09118f0311af26ce5ba303c1f15b358772 # 1.93
         with:
           targets: ${{ matrix.target }}
