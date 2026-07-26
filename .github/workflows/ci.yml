@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Callable so release.yml can gate a tagged release on the full CI suite.
+  # Tag pushes don't match the triggers above, so without this a release would
+  # publish signed binaries from a commit CI never checked.
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always

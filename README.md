@@ -75,22 +75,45 @@ This is essentially a super narrow version of [mailrise](https://github.com/YoRy
 Release binaries for `x86_64` and `aarch64` Linux are published on the [Releases page](https://github.com/lheimbs/chimney-post/releases).
 Each release tarball is signed with a cosign keyless signature (sigstore) and carries SLSA build provenance attested via GitHub Actions OIDC.
 
-Download a tarball and its `.bundle` sidecar, then verify the signature (replace `<version>` and `<target>` with the release version and architecture you downloaded):
+Binaries are built on Ubuntu 22.04 and dynamically link glibc 2.35, so they run on Debian 12+, Ubuntu 22.04+, and anything else with glibc 2.35 or newer. On older distributions, build from source instead.
+
+In the commands below, replace `<version>` with the release tag (e.g. `v0.1.0`) and `<target>` with `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`.
+
+Download a tarball and its `.bundle` sidecar, then verify the signature:
 
 ```sh
 cosign verify-blob chimney-post-<version>-<target>.tar.gz \
   --bundle chimney-post-<version>-<target>.tar.gz.bundle \
-  --certificate-identity-regexp "https://github\.com/lheimbs/chimney-post" \
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+  --certificate-identity "https://github.com/lheimbs/chimney-post/.github/workflows/release.yml@refs/tags/<version>" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  --certificate-github-workflow-repository "lheimbs/chimney-post"
+```
+
+The `--certificate-identity` value pins the exact repository, workflow file, and tag that produced the signature. If you script this across releases and need a pattern, anchor it — `--certificate-identity-regexp` is matched unanchored, so an unanchored pattern also accepts signatures from other workflows and other similarly-named repositories:
+
+```sh
+--certificate-identity-regexp '^https://github\.com/lheimbs/chimney-post/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
 ```
 
 To verify build provenance (requires the [GitHub CLI](https://cli.github.com/)):
 
 ```sh
-gh attestation verify chimney-post-<version>-<target>.tar.gz --repo lheimbs/chimney-post
+gh attestation verify chimney-post-<version>-<target>.tar.gz \
+  --repo lheimbs/chimney-post \
+  --signer-workflow lheimbs/chimney-post/.github/workflows/release.yml
 ```
 
-Checksums for all artifacts are in `SHA256SUMS` (also signed).
+Checksums for all artifacts are in `SHA256SUMS`, which is signed the same way. Verifying it once is the cheaper path if you downloaded several assets:
+
+```sh
+cosign verify-blob SHA256SUMS \
+  --bundle SHA256SUMS.bundle \
+  --certificate-identity "https://github.com/lheimbs/chimney-post/.github/workflows/release.yml@refs/tags/<version>" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  --certificate-github-workflow-repository "lheimbs/chimney-post"
+
+sha256sum -c SHA256SUMS --ignore-missing
+```
 
 ### Build
 
