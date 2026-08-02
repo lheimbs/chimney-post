@@ -7,12 +7,28 @@ on:
       # prerelease tags like `v1.0.0-rc.1`, which would publish as a normal
       # "latest" release.
       - 'v[0-9]+.[0-9]+.[0-9]+'
-  # TEMPORARY: lets this workflow be exercised end-to-end before the first real
-  # tag exists, since a tag push is otherwise the only way it ever runs. A
-  # dispatch run builds and signs as usual but publishes a *draft* release under
-  # a throwaway version (see VERSION below), so it can't be mistaken for a real
-  # one -- delete the draft afterwards. Remove this trigger once validated.
+  # TEMPORARY: covers the one gap the pull_request trigger below can't -- the
+  # actual release publish. A dispatch run builds and signs as usual but
+  # publishes a *draft* release under a throwaway version (see VERSION below),
+  # so no tag is created and nothing can be mistaken for a real release; delete
+  # the draft afterwards. Note dispatch only becomes available once this file is
+  # on the default branch, so this is a post-merge check. Remove once validated.
   workflow_dispatch:
+  # TEMPORARY: a tag push is otherwise the only way this workflow ever runs,
+  # which means it would first execute on a real release. `pull_request` runs
+  # the workflow file as it exists in the PR, so everything up to (but not
+  # including) the publish step gets real pre-merge coverage: the CI gate, both
+  # native builds, the smoke test, reproducible packaging, cosign signing
+  # against real OIDC, provenance generation, and the checksum re-verification.
+  # Scoped by path so it doesn't run on unrelated PRs. Remove once validated.
+  #
+  # Signing on a PR writes to the public Rekor transparency log, which is
+  # append-only -- those test entries are permanent (harmless, but not undoable).
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/workflows/ci.yml'
 
 permissions:
   contents: read
@@ -25,10 +41,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # The tag on a real release; a throwaway identifier on manual dispatch runs,
-  # where `github.ref_name` is a branch name. Every artifact name, attestation
-  # subject and verification command derives from this one value.
-  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('v0.0.0-dispatch.{0}', github.run_number) }}
+  # The tag on a real release; a throwaway identifier on the temporary
+  # pull_request / workflow_dispatch runs, where `github.ref_name` is a branch
+  # name or a PR merge ref. Every artifact name, attestation subject and
+  # verification command derives from this one value.
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('v0.0.0-test.{0}', github.run_number) }}
 
 jobs:
   # Gate the whole release on the same checks main gets. Tag pushes don't
@@ -200,7 +217,11 @@ jobs:
       - name: Verify checksums against signed SHA256SUMS
         working-directory: artifacts
         run: sha256sum -c SHA256SUMS
+      # Everything above this point runs on PRs too; only the publish itself is
+      # skipped there, so a PR run never creates a release or a tag. (Remove
+      # this condition along with the temporary pull_request trigger.)
       - name: Create GitHub Release
+        if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           # On a tag push this is the tag itself. On a manual dispatch run it's
