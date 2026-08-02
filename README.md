@@ -75,7 +75,9 @@ This is essentially a super narrow version of [mailrise](https://github.com/YoRy
 Release binaries for `x86_64` and `aarch64` Linux are published on the [Releases page](https://github.com/lheimbs/chimney-post/releases).
 Each release tarball is signed with a cosign keyless signature (sigstore) and carries SLSA build provenance attested via GitHub Actions OIDC.
 
-Binaries are built on Ubuntu 22.04 and dynamically link glibc 2.35, so they run on Debian 12+, Ubuntu 22.04+, and anything else with glibc 2.35 or newer. On older distributions, build from source instead.
+Binaries are built on Ubuntu 24.04 and dynamically link glibc 2.39, so they run on Ubuntu 24.04+, Debian 13+, and anything else with glibc 2.39 or newer. On older distributions — including Debian 12 (glibc 2.36) and Ubuntu 22.04 (2.35) — build from source instead.
+
+Each tarball is built reproducibly: member order, timestamps and ownership are normalised, so rebuilding the same commit yields a byte-identical archive and therefore the same digest as the one that was signed and attested.
 
 In the commands below, replace `<version>` with the release tag (e.g. `v0.1.0`) and `<target>` with `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`.
 
