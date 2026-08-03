@@ -178,6 +178,30 @@ jobs:
           for f in *.tar.gz SHA256SUMS; do
             cosign sign-blob --yes --bundle="$f.bundle" "$f"
           done
+      # Runs the same command the README and the release notes hand to users,
+      # against the artifacts just signed, so the published instructions can't
+      # silently drift from what cosign actually accepts. cosign v3 writes the
+      # standardised Sigstore bundle (`...bundle.v0.3+json`) rather than v2's
+      # legacy format, and older clients need an explicit --new-bundle-format
+      # to read it -- exactly the kind of change this step is here to catch.
+      #
+      # The identity is built from `github.workflow_ref`, which is already
+      # `<owner>/<repo>/.github/workflows/release.yml@<ref>` -- the same value
+      # that ends up in the certificate SAN, so this works on tag and PR runs
+      # alike without hardcoding either.
+      - name: Verify the signatures the way users will
+        working-directory: artifacts
+        run: |
+          set -eo pipefail
+          for f in *.tar.gz SHA256SUMS; do
+            echo "::group::verify $f"
+            cosign verify-blob "$f" \
+              --bundle "$f.bundle" \
+              --certificate-identity "https://github.com/${{ github.workflow_ref }}" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --certificate-github-workflow-repository "${{ github.repository }}"
+            echo "::endgroup::"
+          done
       - name: Generate SLSA build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
         with:
