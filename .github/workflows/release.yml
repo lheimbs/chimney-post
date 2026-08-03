@@ -79,7 +79,7 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       # Pinned to 1.93 to match ci.yml: Rust 1.94+ fails `cargo build` with a
@@ -149,7 +149,7 @@ jobs:
             *"/nonexistent/chimney-post.toml"*) ;;
             *) echo "::error::binary did not reach its config loader" >&2; exit 1 ;;
           esac
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: build-${{ matrix.target }}
           path: chimney-post-${{ env.VERSION }}-${{ matrix.target }}.tar.gz
@@ -163,7 +163,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
           pattern: build-*
@@ -171,7 +171,7 @@ jobs:
       - name: Generate SHA256SUMS
         working-directory: artifacts
         run: sha256sum *.tar.gz > SHA256SUMS
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4
       - name: Sign artifacts with cosign (keyless)
         working-directory: artifacts
         run: |
@@ -187,7 +187,7 @@ jobs:
           subject-path: |
             artifacts/chimney-post-${{ env.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
             artifacts/chimney-post-${{ env.VERSION }}-aarch64-unknown-linux-gnu.tar.gz
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: signatures
           path: |
@@ -201,12 +201,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
           pattern: build-*
           merge-multiple: true
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: signatures
           name: signatures

@@ -17,7 +17,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Pinned to 1.93: Rust 1.94+ clippy overflows the query depth limit while
       # computing the layout of matrix-sdk's huge `Client::sync()` future
       # ("queries overflow the depth limit!"). It's a regression in the
@@ -34,7 +34,7 @@ jobs:
   msrv:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
       # Enforce the declared minimum supported Rust version.
@@ -43,7 +43,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@cargo-audit
       # Fails on known security vulnerabilities in the dependency tree.
       - run: cargo audit
