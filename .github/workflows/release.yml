@@ -280,7 +280,9 @@ jobs:
             identity of this repository's release workflow. Signatures are recorded in the public
             [Rekor](https://github.com/sigstore/rekor) transparency log.
 
-            Install [cosign](https://github.com/sigstore/cosign), then verify a tarball:
+            Install [cosign](https://github.com/sigstore/cosign) **v3.0 or newer** -- these are standard Sigstore
+            bundles, which cosign v2.6.x reads only with `--new-bundle-format` and v2.5 and older cannot read.
+            Then verify a tarball:
 
             ```sh
             cosign verify-blob chimney-post-${{ env.VERSION }}-<target>.tar.gz \

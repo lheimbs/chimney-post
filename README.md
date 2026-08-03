@@ -81,7 +81,7 @@ Each tarball is built reproducibly: member order, timestamps and ownership are n
 
 In the commands below, replace `<version>` with the release tag (e.g. `v0.1.0`) and `<target>` with `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`.
 
-Download a tarball and its `.bundle` sidecar, then verify the signature:
+Download a tarball and its `.bundle` sidecar, then verify the signature. This needs **cosign v3.0 or newer** — the `.bundle` files are standard Sigstore bundles, which cosign v2.6.x can only read if you add `--new-bundle-format`, and cosign v2.5 and older cannot read at all:
 
 ```sh
 cosign verify-blob chimney-post-<version>-<target>.tar.gz \
