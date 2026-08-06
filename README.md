@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/lheimbs/chimney-post/actions/workflows/ci.yml"><img src="https://github.com/lheimbs/chimney-post/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/lheimbs/chimney-post/releases"><img src="https://img.shields.io/github/v/release/lheimbs/chimney-post" alt="Latest Release"></a>
   <a href="https://github.com/lheimbs/chimney-post/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/rust-1.88%2B-orange" alt="Minimum Rust version: 1.88">
 </p>
@@ -68,6 +69,53 @@ This is essentially a super narrow version of [mailrise](https://github.com/YoRy
 - Rust 1.88 or later (install via [rustup](https://rustup.rs/))
 - A Matrix account for the bot
 - A Matrix room where the bot should post (invite the bot user to the room)
+
+### Pre-built Binaries
+
+Release binaries for `x86_64` and `aarch64` Linux are published on the [Releases page](https://github.com/lheimbs/chimney-post/releases).
+Each release tarball is signed with a cosign keyless signature (sigstore) and carries SLSA build provenance attested via GitHub Actions OIDC.
+
+Binaries are built on Ubuntu 24.04 and dynamically link glibc 2.39, so they run on Ubuntu 24.04+, Debian 13+, and anything else with glibc 2.39 or newer. On older distributions — including Debian 12 (glibc 2.36) and Ubuntu 22.04 (2.35) — build from source instead.
+
+Each tarball is built reproducibly: member order, timestamps and ownership are normalised, so rebuilding the same commit yields a byte-identical archive and therefore the same digest as the one that was signed and attested.
+
+In the commands below, replace `<version>` with the release tag (e.g. `v0.1.0`) and `<target>` with `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`.
+
+Download a tarball and its `.bundle` sidecar, then verify the signature. This needs **cosign v3.0 or newer** — the `.bundle` files are standard Sigstore bundles, which cosign v2.6.x can only read if you add `--new-bundle-format`, and cosign v2.5 and older cannot read at all:
+
+```sh
+cosign verify-blob chimney-post-<version>-<target>.tar.gz \
+  --bundle chimney-post-<version>-<target>.tar.gz.bundle \
+  --certificate-identity "https://github.com/lheimbs/chimney-post/.github/workflows/release.yml@refs/tags/<version>" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  --certificate-github-workflow-repository "lheimbs/chimney-post"
+```
+
+The `--certificate-identity` value pins the exact repository, workflow file, and tag that produced the signature. If you script this across releases and need a pattern, anchor it — `--certificate-identity-regexp` is matched unanchored, so an unanchored pattern also accepts signatures from other workflows and other similarly-named repositories:
+
+```sh
+--certificate-identity-regexp '^https://github\.com/lheimbs/chimney-post/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
+```
+
+To verify build provenance (requires the [GitHub CLI](https://cli.github.com/)):
+
+```sh
+gh attestation verify chimney-post-<version>-<target>.tar.gz \
+  --repo lheimbs/chimney-post \
+  --signer-workflow lheimbs/chimney-post/.github/workflows/release.yml
+```
+
+Checksums for all artifacts are in `SHA256SUMS`, which is signed the same way. Verifying it once is the cheaper path if you downloaded several assets:
+
+```sh
+cosign verify-blob SHA256SUMS \
+  --bundle SHA256SUMS.bundle \
+  --certificate-identity "https://github.com/lheimbs/chimney-post/.github/workflows/release.yml@refs/tags/<version>" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  --certificate-github-workflow-repository "lheimbs/chimney-post"
+
+sha256sum -c SHA256SUMS --ignore-missing
+```
 
 ### Build
 
