@@ -23,6 +23,11 @@ matrix-sdk = { version = "0.16.0", default-features = false, features = [
     "sqlite",
     "rustls-tls",
 ] }
+# Not used directly in source. Unions `rustls-tls-native-roots` into the
+# `reqwest` that matrix-sdk pulls in, so the OS trust store is searched
+# alongside the bundled webpki-roots -- otherwise a homeserver behind a
+# private/corporate CA fails to connect under rustls. See README.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
 url = "2.5.7"
 minijinja = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
