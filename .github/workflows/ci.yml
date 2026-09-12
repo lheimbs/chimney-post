@@ -65,3 +65,58 @@ jobs:
       - uses: actions/checkout@v7
       # shellcheck ships preinstalled on the ubuntu-latest runner image.
       - run: shellcheck install.sh
+
+  # Exercises install.sh for real: latest-release resolution, download,
+  # checksum + cosign verification, and installing to the actual system paths
+  # (/usr/local/bin, /etc/chimney-post, /etc/systemd/system) via the script's
+  # own internal `sudo` calls. Safe here because the runner is a disposable
+  # VM. This intentionally installs whatever release is currently published
+  # (not something built from this PR) -- it is a test of the installer's
+  # mechanics, not of in-flight source changes.
+  install-script:
+    needs: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4
+      - name: Rejects an invalid CHIMNEY_MTA
+        run: |
+          if CHIMNEY_MTA=bogus bash install.sh; then
+            echo "::error::expected failure for an invalid CHIMNEY_MTA value" >&2
+            exit 1
+          fi
+      # Runner user has passwordless sudo, so this exercises the script's
+      # internal $SUDO path without any prompt. Default CHIMNEY_MTA=ask with
+      # no controlling terminal on the runner, so this also covers the
+      # non-interactive auto-skip path; timeout guards against a `read`
+      # somehow blocking instead.
+      - name: Install (real defaults, unprivileged user, sudo internally)
+        run: timeout 120 bash install.sh
+      - name: Binary is installed and runs
+        run: |
+          test -x /usr/local/bin/chimney-post
+          out=$(CHIMNEY_CONFIG=/nonexistent/chimney-post.toml /usr/local/bin/chimney-post 2>&1) && rc=0 || rc=$?
+          if [ "${rc:-0}" -ne 1 ]; then
+            echo "::error::expected exit 1 from config load failure, got ${rc:-0}" >&2
+            exit 1
+          fi
+          case "$out" in
+            *"/nonexistent/chimney-post.toml"*) ;;
+            *) echo "::error::binary did not reach its config loader" >&2; exit 1 ;;
+          esac
+      - name: Template config and systemd unit are installed correctly
+        run: |
+          test -f /etc/chimney-post/config.toml
+          [ "$(stat -c %a /etc/chimney-post/config.toml)" = "600" ]
+          test -f /etc/systemd/system/chimney-post.service
+          systemd-analyze verify /etc/systemd/system/chimney-post.service
+      - name: Re-running never clobbers an existing config
+        run: |
+          echo "# ci marker" | sudo tee -a /etc/chimney-post/config.toml >/dev/null
+          CHIMNEY_MTA=no bash install.sh
+          # config.toml is 0600 root-owned, so reading it back needs sudo too.
+          sudo grep -q "# ci marker" /etc/chimney-post/config.toml
+      - name: Custom install prefix and CHIMNEY_SKIP_SYSTEMD both work
+        run: |
+          CHIMNEY_INSTALL_PREFIX="$RUNNER_TEMP/bin" CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_MTA=no bash install.sh
+          test -x "$RUNNER_TEMP/bin/chimney-post"
