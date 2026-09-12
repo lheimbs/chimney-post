@@ -13,7 +13,21 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.9.8"
 thiserror = "2.0.18"
-matrix-sdk = { version = "0.16.0", features = ["e2e-encryption", "sqlite"] }
+# default-features is off only to drop `native-tls`; the other three are
+# matrix-sdk's own defaults, re-listed verbatim. `rustls-tls` replaces OpenSSL
+# with a pure-Rust TLS stack, which removes the openssl-sys build-script
+# dependency on target-arch OpenSSL headers.
+matrix-sdk = { version = "0.16.0", default-features = false, features = [
+    "e2e-encryption",
+    "automatic-room-key-forwarding",
+    "sqlite",
+    "rustls-tls",
+] }
+# Not used directly in source. Unions `rustls-tls-native-roots` into the
+# `reqwest` that matrix-sdk pulls in, so the OS trust store is searched
+# alongside the bundled webpki-roots -- otherwise a homeserver behind a
+# private/corporate CA fails to connect under rustls. See README.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
 url = "2.5.7"
 minijinja = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }

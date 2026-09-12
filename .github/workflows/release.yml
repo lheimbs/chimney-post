@@ -39,10 +39,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Build natively on each architecture rather than cross-compiling:
-          # matrix-sdk pulls in openssl-sys (via reqwest -> hyper-tls ->
-          # native-tls) without the `vendored` feature, so a cross build would
-          # need target-arch OpenSSL headers and a cross pkg-config sysroot.
+          # Build natively on each architecture rather than cross-compiling.
+          # Cross-compiling aarch64 does work now that the dependency tree is
+          # OpenSSL-free (rustls-tls, bundled SQLite) -- this is a simplicity
+          # choice, not a hard requirement: no cross toolchain or cross
+          # pkg-config sysroot to install or maintain.
           #
           # Runner versions are pinned, not `ubuntu-latest`, because the runner's
           # glibc sets the floor for where these binaries will run: 24.04 is
@@ -66,12 +67,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@841e5d09118f0311af26ce5ba303c1f15b358772 # 1.93
         with:
           targets: ${{ matrix.target }}
-      # Present on the runner images, but this is the dependency that broke the
-      # original cross-compiled build -- make it explicit rather than implicit.
-      - name: Install OpenSSL development headers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
       # Deliberately no build cache. This job's output is signed and carries
       # SLSA provenance; a poisoned cache entry would produce a compromised
       # binary with a perfectly valid signature and attestation. Releases are

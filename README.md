@@ -185,6 +185,13 @@ All settings live in a single TOML file. See `config.example.toml` for a fully a
 | `message_template` | *(built-in)*     | MiniJinja template for formatting messages.        |
 | `routes`           | *(none)*         | Optional room-routing rules; see [Room routing](#room-routing). |
 
+TLS to `homeserver` is handled by [rustls](https://github.com/rustls/rustls),
+not OpenSSL. Both the bundled Mozilla root set and your OS's trust store are
+checked, so a homeserver with a certificate from a private/corporate CA that's
+trusted by the machine's OS will work. Two things rustls is stricter about
+than OpenSSL and won't accept from *either* store: TLS 1.0/1.1, and
+certificates that carry only a CN with no SAN.
+
 ### Room routing
 
 By default every email is delivered to `room_id`. To fan notifications out to
