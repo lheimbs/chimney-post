@@ -30,6 +30,17 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy -- -D warnings
       - run: cargo test
+      # Regression guard: openssl-sys previously broke aarch64 cross-compiling
+      # (needs target-arch headers + a cross pkg-config sysroot) and is why the
+      # dependency tree switched to rustls-tls. Catches it coming back through
+      # a future dependency bump re-enabling a native-tls feature.
+      - name: Assert openssl-sys stays out of the dependency graph
+        run: |
+          if cargo tree -e normal,build -i openssl-sys >/dev/null 2>&1; then
+            echo "::error::openssl-sys is back in the dependency graph -- this breaks aarch64 cross-compilation" >&2
+            cargo tree -e normal,build -i openssl-sys >&2
+            exit 1
+          fi
 
   msrv:
     runs-on: ubuntu-latest
