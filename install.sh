@@ -214,17 +214,21 @@ case "$MTA_MODE" in
   ask)
     if [ "$mta_detected" = "1" ]; then
       log "An MTA (sendmail-compatible) is already installed -- skipping msmtp setup."
-    elif [ "$NONINTERACTIVE" = "1" ] || [ ! -e /dev/tty ]; then
-      log "No MTA detected. Non-interactive install -- skipping msmtp setup (set CHIMNEY_MTA=yes to install it automatically)."
-    else
-      # stdin is the piped script when run as `curl | bash`, so prompt on the
-      # controlling terminal directly rather than reading stdin.
-      printf 'No sendmail-compatible MTA detected. Install msmtp as one now? [y/N] ' > /dev/tty
-      read -r reply < /dev/tty || reply=""
+    elif [ "$NONINTERACTIVE" = "1" ]; then
+      log "No MTA detected. CHIMNEY_NONINTERACTIVE=1 -- skipping msmtp setup (set CHIMNEY_MTA=yes to install it automatically)."
+    # stdin is the piped script when run as `curl | bash`, so prompt on the
+    # controlling terminal directly rather than reading stdin. /dev/tty can
+    # exist as a device node with no controlling terminal behind it (e.g. in
+    # CI) -- opening it then fails with ENXIO -- so the open+read is the
+    # condition itself rather than a separate existence check beforehand.
+    elif { printf 'No sendmail-compatible MTA detected. Install msmtp as one now? [y/N] ' > /dev/tty \
+        && read -r reply < /dev/tty; } 2>/dev/null; then
       case "$reply" in
         [yY]|[yY][eE][sS]) setup_msmtp ;;
         *) log "Skipping msmtp setup." ;;
       esac
+    else
+      log "No MTA detected. Not running interactively -- skipping msmtp setup (set CHIMNEY_MTA=yes to install it automatically)."
     fi
     ;;
 esac
