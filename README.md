@@ -70,9 +70,29 @@ This is essentially a super narrow version of [mailrise](https://github.com/YoRy
 - A Matrix account for the bot
 - A Matrix room where the bot should post (invite the bot user to the room)
 
+### Quick Install (Linux)
+
+The install script downloads the latest signed release for your architecture, verifies its checksum and cosign/sigstore signature, installs the binary, writes a template `config.toml`, and installs the systemd unit (see [Running as a systemd Service](#running-as-a-systemd-service)). It also offers to set up `msmtp` (see [Sending Mail from Local Tools](#sending-mail-from-local-tools-mailx-cron-apticron-)) if no MTA is detected.
+
+Review [`install.sh`](install.sh) before running it, as with any script piped into a shell:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lheimbs/chimney-post/main/install.sh | sudo bash
+```
+
+Requires [cosign](https://docs.sigstore.dev/system_config/installation/) v3+ to be installed for signature verification (recommended -- see [Pre-built Binaries](#pre-built-binaries) below for why). The script is configurable via environment variables; see the comment header of `install.sh` for the full list, e.g.:
+
+```bash
+# Install a specific version, skip the systemd unit, and skip the MTA prompt
+curl -fsSL https://raw.githubusercontent.com/lheimbs/chimney-post/main/install.sh \
+  | sudo CHIMNEY_VERSION=v0.1.0 CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_MTA=no bash
+```
+
+It never overwrites an existing `config.toml` or `/etc/msmtprc`, and is safe to re-run to upgrade the binary and unit file in place.
+
 ### Pre-built Binaries
 
-Release binaries for `x86_64` and `aarch64` Linux are published on the [Releases page](https://github.com/lheimbs/chimney-post/releases).
+Release binaries for `x86_64` and `aarch64` Linux are published on the [Releases page](https://github.com/lheimbs/chimney-post/releases). This section documents the manual steps that `install.sh` above automates, useful if you want to inspect each step yourself.
 Each release tarball is signed with a cosign keyless signature (sigstore) and carries SLSA build provenance attested via GitHub Actions OIDC.
 
 Binaries are built on Ubuntu 24.04 and dynamically link glibc 2.39, so they run on Ubuntu 24.04+, Debian 13+, and anything else with glibc 2.39 or newer. On older distributions — including Debian 12 (glibc 2.36) and Ubuntu 22.04 (2.35) — build from source instead.
@@ -350,7 +370,8 @@ syslog on
 account chimney
 host    127.0.0.1
 port    2525
-from    %U@%H        # e.g. root@myserver -- Chimney Post reads this as the From header
+# e.g. root@myserver -- Chimney Post reads this as the From header
+from    %U@%H
 
 account default : chimney
 ```
@@ -369,11 +390,11 @@ Without any `[[matrix.routes]]` rules the recipient address is just a placeholde
 
 If you want a second layer of durability across Chimney Post restarts, use a queuing relay instead of `msmtp`:
 
-| Option       | Daemon | Local queue | Notes                                            |
-|--------------|--------|-------------|--------------------------------------------------|
-| **msmtp**    | no     | no          | Simplest; fine given Chimney Post's own queue.   |
-| **nullmailer** | yes  | yes         | Tiny; spools locally and retries to the relay.   |
-| **dma**      | no     | yes         | Queues; flushes on submission and via cron.      |
+| Option         | Daemon | Local queue | Notes                                            |
+|----------------|--------|-------------|--------------------------------------------------|
+| **msmtp**      | no     | no          | Simplest; fine given Chimney Post's own queue.   |
+| **nullmailer** | yes    | yes         | Tiny; spools locally and retries to the relay.   |
+| **dma**        | no     | yes         | Queues; flushes on submission and via cron.      |
 
 Start with `msmtp`; reach for `nullmailer` only if you actually observe mail lost during restarts.
 
