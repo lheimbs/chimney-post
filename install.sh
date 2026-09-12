@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # Chimney Post installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/lheimbs/chimney-post/main/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/lheimbs/chimney-post/main/install.sh | bash
 #
 # Downloads the latest (or pinned) signed release tarball, verifies it against
 # its published checksum and cosign/sigstore signature, installs the binary,
 # and optionally sets up the systemd service and an msmtp MTA. Every step is
 # safe to re-run: it upgrades the binary and unit file in place but never
 # overwrites an existing config.toml or msmtprc.
+#
+# Run as a regular user -- installing the binary, config, and systemd unit
+# needs root, so the script calls `sudo` itself (only for the specific
+# commands that need it) and may prompt for your password.
 #
 # Configuration is via environment variables (all optional):
 #   CHIMNEY_VERSION         Release tag to install, e.g. "v0.1.0" (default: latest)
@@ -39,10 +43,6 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || err "required command '$1' not found -- please install it and re-run"
 }
 
-if [ "$(id -u)" -ne 0 ]; then
-  err "must be run as root (installs to $INSTALL_PREFIX, $CONFIG_DIR, and /etc/systemd/system). Try: curl ... | sudo bash"
-fi
-
 case "$MTA_MODE" in
   ask|yes|no) ;;
   *) err "CHIMNEY_MTA must be one of: ask, yes, no (got '$MTA_MODE')" ;;
@@ -52,6 +52,19 @@ need_cmd curl
 need_cmd tar
 need_cmd sha256sum
 need_cmd install
+
+# Installing to $INSTALL_PREFIX, $CONFIG_DIR, and /etc/systemd/system needs
+# root. Run privileged commands through $SUDO rather than requiring the whole
+# script to run as root, so `curl | bash` (no `sudo`) works: only the specific
+# commands that need it prompt, via sudo's own /dev/tty password prompt.
+if [ "$(id -u)" -eq 0 ]; then
+  SUDO=""
+else
+  need_cmd sudo
+  log "Some steps need root -- sudo may prompt for your password."
+  sudo -v || err "sudo authentication failed"
+  SUDO="sudo"
+fi
 
 case "$(uname -s)" in
   Linux) ;;
@@ -110,24 +123,28 @@ fi
 
 log "Installing binary to ${INSTALL_PREFIX}/chimney-post..."
 tar -xzf "$TMPDIR/$TARBALL" -C "$TMPDIR" chimney-post
-install -d -m 0755 "$INSTALL_PREFIX"
-install -m 0755 -o root -g root "$TMPDIR/chimney-post" "$INSTALL_PREFIX/chimney-post"
+$SUDO install -d -m 0755 "$INSTALL_PREFIX"
+$SUDO install -m 0755 -o root -g root "$TMPDIR/chimney-post" "$INSTALL_PREFIX/chimney-post"
 
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/${VERSION}"
 
 if [ "$SKIP_SYSTEMD" = "1" ]; then
   log "CHIMNEY_SKIP_SYSTEMD=1 -- skipping config/systemd setup."
 else
-  install -d -m 0755 "$CONFIG_DIR"
+  # $CONFIG_DIR is root-owned, so an existing config.toml is only checked
+  # for/written to via $SUDO -- a plain `[ -e ]` as a non-root user would
+  # still work (0755 dirs are traversable/readable by anyone), but $SUDO
+  # keeps this correct even if the directory's permissions are tightened.
+  $SUDO install -d -m 0755 "$CONFIG_DIR"
 
-  if [ -e "$CONFIG_DIR/config.toml" ]; then
+  if $SUDO test -e "$CONFIG_DIR/config.toml"; then
     log "Leaving existing $CONFIG_DIR/config.toml in place."
   else
     log "Writing template config to ${CONFIG_DIR}/config.toml..."
     fetch_config_url="$RAW_BASE/config.example.toml"
-    curl -fsSL "$fetch_config_url" -o "$CONFIG_DIR/config.toml" \
+    curl -fsSL "$fetch_config_url" -o "$TMPDIR/config.toml" \
       || err "failed to download $fetch_config_url"
-    chmod 600 "$CONFIG_DIR/config.toml"
+    $SUDO install -m 0600 "$TMPDIR/config.toml" "$CONFIG_DIR/config.toml"
   fi
 
   if command -v systemctl >/dev/null 2>&1; then
@@ -140,8 +157,8 @@ else
       sed -i "s|^ExecStart=/usr/local/bin/chimney-post|ExecStart=${INSTALL_PREFIX}/chimney-post|" \
         "$TMPDIR/chimney-post.service"
     fi
-    install -m 0644 "$TMPDIR/chimney-post.service" /etc/systemd/system/chimney-post.service
-    systemctl daemon-reload
+    $SUDO install -m 0644 "$TMPDIR/chimney-post.service" /etc/systemd/system/chimney-post.service
+    $SUDO systemctl daemon-reload
     log "Service unit installed (not started -- fill in ${CONFIG_DIR}/config.toml first, see 'Next steps' below)."
   else
     warn "systemctl not found -- skipping systemd unit installation."
@@ -155,10 +172,10 @@ setup_msmtp() {
     return
   fi
   log "Installing msmtp, msmtp-mta, bsd-mailx..."
-  apt-get update -qq || err "apt-get update failed"
-  apt-get install -y msmtp msmtp-mta bsd-mailx || err "failed to install msmtp packages"
+  $SUDO apt-get update -qq || err "apt-get update failed"
+  $SUDO apt-get install -y msmtp msmtp-mta bsd-mailx || err "failed to install msmtp packages"
 
-  if [ -e /etc/msmtprc ]; then
+  if $SUDO test -e /etc/msmtprc; then
     log "Leaving existing /etc/msmtprc in place."
     return
   fi
@@ -166,7 +183,7 @@ setup_msmtp() {
   # Matches the smtp.bind port in config.example.toml (2525); adjust
   # /etc/msmtprc yourself if you changed [smtp].bind.
   log "Writing /etc/msmtprc..."
-  cat > /etc/msmtprc <<'EOF'
+  cat > "$TMPDIR/msmtprc" <<'EOF'
 defaults
 auth   off
 tls    off
@@ -179,7 +196,7 @@ from    %U@%H
 
 account default : chimney
 EOF
-  chmod 644 /etc/msmtprc
+  $SUDO install -m 0644 "$TMPDIR/msmtprc" /etc/msmtprc
 }
 
 mta_detected=0

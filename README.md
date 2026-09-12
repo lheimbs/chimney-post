@@ -74,10 +74,12 @@ This is essentially a super narrow version of [mailrise](https://github.com/YoRy
 
 The install script downloads the latest signed release for your architecture, verifies its checksum and cosign/sigstore signature, installs the binary, writes a template `config.toml`, and installs the systemd unit (see [Running as a systemd Service](#running-as-a-systemd-service)). It also offers to set up `msmtp` (see [Sending Mail from Local Tools](#sending-mail-from-local-tools-mailx-cron-apticron-)) if no MTA is detected.
 
+Run it as a regular user, not with `sudo`: the script calls `sudo` itself for the specific steps that need root (installing the binary, config, and systemd unit) and will prompt for your password when it gets there.
+
 Review [`install.sh`](install.sh) before running it, as with any script piped into a shell:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lheimbs/chimney-post/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/lheimbs/chimney-post/main/install.sh | bash
 ```
 
 Requires [cosign](https://docs.sigstore.dev/system_config/installation/) v3+ to be installed for signature verification (recommended -- see [Pre-built Binaries](#pre-built-binaries) below for why). The script is configurable via environment variables; see the comment header of `install.sh` for the full list, e.g.:
@@ -85,7 +87,7 @@ Requires [cosign](https://docs.sigstore.dev/system_config/installation/) v3+ to 
 ```bash
 # Install a specific version, skip the systemd unit, and skip the MTA prompt
 curl -fsSL https://raw.githubusercontent.com/lheimbs/chimney-post/main/install.sh \
-  | sudo CHIMNEY_VERSION=v0.1.0 CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_MTA=no bash
+  | CHIMNEY_VERSION=v0.1.0 CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_MTA=no bash
 ```
 
 It never overwrites an existing `config.toml` or `/etc/msmtprc`, and is safe to re-run to upgrade the binary and unit file in place.
