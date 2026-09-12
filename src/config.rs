@@ -202,6 +202,16 @@ impl Config {
                 "matrix.homeserver must not be empty".to_string(),
             ));
         }
+        // Parsed here too (not just at connect time in MatrixClient::connect),
+        // so a malformed homeserver URL fails `Config::load` synchronously at
+        // startup instead of passing readiness and looping forever in the
+        // background delivery worker's connect retries.
+        self.matrix
+            .homeserver
+            .parse::<url::Url>()
+            .map_err(|error| {
+                ChimneyError::Config(format!("invalid matrix.homeserver URL: {error}"))
+            })?;
 
         if is_blank(&self.matrix.user_id) {
             return Err(ChimneyError::Config(
@@ -470,6 +480,18 @@ mod tests {
         }];
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("matrix.routes[0].room_id"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_homeserver_url() {
+        // Mirrors validate_rejects_invalid_user_id: a malformed homeserver URL
+        // must fail Config::load synchronously, not surface later as a
+        // connect-retry loop in the background delivery worker (see
+        // MatrixClient::connect).
+        let mut config = valid_config();
+        config.matrix.homeserver = "not a url".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("matrix.homeserver"));
     }
 
     #[test]
