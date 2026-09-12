@@ -128,41 +128,41 @@ $SUDO install -m 0755 -o root -g root "$TMPDIR/chimney-post" "$INSTALL_PREFIX/ch
 
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/${VERSION}"
 
-if [ "$SKIP_SYSTEMD" = "1" ]; then
-  log "CHIMNEY_SKIP_SYSTEMD=1 -- skipping config/systemd setup."
+# $CONFIG_DIR is root-owned, so an existing config.toml is only checked
+# for/written to via $SUDO -- a plain `[ -e ]` as a non-root user would still
+# work (0755 dirs are traversable/readable by anyone), but $SUDO keeps this
+# correct even if the directory's permissions are tightened. Config.toml is
+# needed regardless of init system, so this runs even under
+# CHIMNEY_SKIP_SYSTEMD=1 -- that flag only controls the systemd unit below.
+$SUDO install -d -m 0755 "$CONFIG_DIR"
+
+if $SUDO test -e "$CONFIG_DIR/config.toml"; then
+  log "Leaving existing $CONFIG_DIR/config.toml in place."
 else
-  # $CONFIG_DIR is root-owned, so an existing config.toml is only checked
-  # for/written to via $SUDO -- a plain `[ -e ]` as a non-root user would
-  # still work (0755 dirs are traversable/readable by anyone), but $SUDO
-  # keeps this correct even if the directory's permissions are tightened.
-  $SUDO install -d -m 0755 "$CONFIG_DIR"
+  log "Writing template config to ${CONFIG_DIR}/config.toml..."
+  fetch_config_url="$RAW_BASE/config.example.toml"
+  curl -fsSL "$fetch_config_url" -o "$TMPDIR/config.toml" \
+    || err "failed to download $fetch_config_url"
+  $SUDO install -m 0600 "$TMPDIR/config.toml" "$CONFIG_DIR/config.toml"
+fi
 
-  if $SUDO test -e "$CONFIG_DIR/config.toml"; then
-    log "Leaving existing $CONFIG_DIR/config.toml in place."
-  else
-    log "Writing template config to ${CONFIG_DIR}/config.toml..."
-    fetch_config_url="$RAW_BASE/config.example.toml"
-    curl -fsSL "$fetch_config_url" -o "$TMPDIR/config.toml" \
-      || err "failed to download $fetch_config_url"
-    $SUDO install -m 0600 "$TMPDIR/config.toml" "$CONFIG_DIR/config.toml"
+if [ "$SKIP_SYSTEMD" = "1" ]; then
+  log "CHIMNEY_SKIP_SYSTEMD=1 -- skipping systemd unit installation."
+elif command -v systemctl >/dev/null 2>&1; then
+  log "Installing systemd unit..."
+  curl -fsSL "$RAW_BASE/systemd/chimney-post.service" -o "$TMPDIR/chimney-post.service" \
+    || err "failed to download $RAW_BASE/systemd/chimney-post.service"
+  # The unit hardcodes /usr/local/bin; keep it in sync if the binary was
+  # installed somewhere else.
+  if [ "$INSTALL_PREFIX" != "/usr/local/bin" ]; then
+    sed -i "s|^ExecStart=/usr/local/bin/chimney-post|ExecStart=${INSTALL_PREFIX}/chimney-post|" \
+      "$TMPDIR/chimney-post.service"
   fi
-
-  if command -v systemctl >/dev/null 2>&1; then
-    log "Installing systemd unit..."
-    curl -fsSL "$RAW_BASE/systemd/chimney-post.service" -o "$TMPDIR/chimney-post.service" \
-      || err "failed to download $RAW_BASE/systemd/chimney-post.service"
-    # The unit hardcodes /usr/local/bin; keep it in sync if the binary was
-    # installed somewhere else.
-    if [ "$INSTALL_PREFIX" != "/usr/local/bin" ]; then
-      sed -i "s|^ExecStart=/usr/local/bin/chimney-post|ExecStart=${INSTALL_PREFIX}/chimney-post|" \
-        "$TMPDIR/chimney-post.service"
-    fi
-    $SUDO install -m 0644 "$TMPDIR/chimney-post.service" /etc/systemd/system/chimney-post.service
-    $SUDO systemctl daemon-reload
-    log "Service unit installed (not started -- fill in ${CONFIG_DIR}/config.toml first, see 'Next steps' below)."
-  else
-    warn "systemctl not found -- skipping systemd unit installation."
-  fi
+  $SUDO install -m 0644 "$TMPDIR/chimney-post.service" /etc/systemd/system/chimney-post.service
+  $SUDO systemctl daemon-reload
+  log "Service unit installed (not started -- fill in ${CONFIG_DIR}/config.toml first, see 'Next steps' below)."
+else
+  warn "systemctl not found -- skipping systemd unit installation."
 fi
 
 # --- Optional MTA setup (msmtp) ---------------------------------------------
