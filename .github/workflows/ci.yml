@@ -66,6 +66,62 @@ jobs:
       # shellcheck ships preinstalled on the ubuntu-latest runner image.
       - run: shellcheck install.sh
 
+  # Validates the unit file in *this* checkout. install.sh deliberately fetches
+  # the unit from the release tag, so the install-script jobs below can only
+  # ever exercise the already-published one -- this job is what covers changes
+  # to systemd/chimney-post.service before they ship. It needs no published
+  # release, so unlike those jobs it also runs as part of a release.
+  systemd-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Unit file is valid
+        run: |
+          sudo install -m 0755 /bin/true /usr/local/bin/chimney-post
+          sudo cp systemd/chimney-post.service /etc/systemd/system/
+          sudo systemctl daemon-reload
+          systemd-analyze verify /etc/systemd/system/chimney-post.service
+      # The unit runs DynamicUser=yes, so the service is a transient non-root UID
+      # and cannot open the 0600 root-owned config.toml that install.sh and the
+      # README both create. It gets at it through LoadCredential= instead. Prove
+      # that works under the unit's full sandbox by running the real unit with
+      # ExecStart swapped for a command that just reads the config.
+      - name: Service can read a 0600 root-owned config through its credential
+        run: |
+          sudo install -d -m 0755 /etc/chimney-post
+          sudo install -m 0600 config.example.toml /etc/chimney-post/config.toml
+          sudo mkdir -p /etc/systemd/system/chimney-post.service.d
+          # Type=oneshot so `systemctl start` waits for the result and reports it;
+          # Restart= must go with it, because systemd rejects on-failure for
+          # oneshot units. ${CHIMNEY_CONFIG} is systemd's own single-word
+          # expansion, so this also checks Environment= points somewhere real.
+          sudo tee /etc/systemd/system/chimney-post.service.d/ci-readcheck.conf >/dev/null <<'EOF'
+          [Service]
+          Type=oneshot
+          Restart=no
+          WatchdogSec=0
+          TimeoutStartSec=30
+          ExecStart=
+          ExecStart=/usr/bin/grep -qF [matrix] ${CHIMNEY_CONFIG}
+          EOF
+          sudo systemctl daemon-reload
+          if ! sudo systemctl start chimney-post.service; then
+            echo "::error::the service could not read its config -- see the journal below" >&2
+            sudo journalctl -u chimney-post.service --no-pager -n 50 >&2
+            exit 1
+          fi
+      # Control. Without this, the test above would still pass if config.toml
+      # were world-readable or the sandbox were dropped -- i.e. for reasons that
+      # have nothing to do with the credential actually working.
+      - name: Control -- the same sandbox cannot read that config directly
+        run: |
+          if sudo systemd-run --wait --collect --service-type=oneshot \
+               -p DynamicUser=yes \
+               /usr/bin/grep -qF "[matrix]" /etc/chimney-post/config.toml; then
+            echo "::error::a DynamicUser service read the 0600 config directly -- the credential test proves nothing" >&2
+            exit 1
+          fi
+
   # Exercises install.sh for real: latest-release resolution, download,
   # checksum + cosign verification, and installing to the actual system paths
   # (/usr/local/bin, /etc/chimney-post, /etc/systemd/system) via the script's
@@ -144,6 +200,27 @@ jobs:
         run: |
           CHIMNEY_INSTALL_PREFIX="$RUNNER_TEMP/bin" CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_MTA=no bash install.sh
           test -x "$RUNNER_TEMP/bin/chimney-post"
+      - name: msmtp setup (apt) installs a working sendmail
+        run: |
+          CHIMNEY_MTA=yes bash install.sh
+          command -v sendmail
+          sudo test -e /etc/msmtprc
+
+  # Failure paths that only show up on a host the installer was never run on:
+  # an MTA parked outside the invoking user's PATH, an optional package that
+  # cannot be installed, a package manager root cannot reach, and systemd
+  # installed but not running. Each of these used to end the run early -- after
+  # the binary, config and unit were already in place -- so every case here
+  # asserts the installer finished and printed its "Next steps" block, not just
+  # that it exited 0. Containers on the ubuntu-latest runner, since GitHub does
+  # not offer these as native runners.
+  install-script-edge-cases:
+    # Skipped on tag pushes, same reasoning as install-script above.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    needs: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
       # Regression guard for MTA detection. sendmail lives in /usr/sbin, which is
       # not on a regular user's PATH on Debian <=12, so a bare
       # `command -v sendmail` reports "no MTA" on a host that has one -- and
@@ -170,11 +247,119 @@ jobs:
             # And nothing replaced it.
             ! command -v msmtp
           '
-      - name: msmtp setup (apt) installs a working sendmail
+      # setup_msmtp_nix warns and gives up when root cannot reach nix. That is a
+      # skipped optional extra, not a failed install, but `|| return` propagated
+      # its status and `set -e` killed the script at the call site. Reproduced by
+      # putting nix where the invoking user can see it and sudo's secure_path
+      # cannot. Alpine because detect_pkg_manager checks apt/dnf/yum/zypper/pacman
+      # first -- nix is only reached on a host with none of them.
+      - name: A skipped nix msmtp setup does not fail the install
         run: |
-          CHIMNEY_MTA=yes bash install.sh
-          command -v sendmail
-          sudo test -e /etc/msmtprc
+          docker run --rm -v "$PWD/install.sh:/work/install.sh:ro" alpine:latest sh -euxc '
+            apk add --no-cache bash curl tar coreutils sudo
+            adduser -D -s /bin/bash runner
+            echo "runner ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/runner
+            echo "Defaults secure_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" >> /etc/sudoers.d/runner
+            chmod 0440 /etc/sudoers.d/runner
+            mkdir -p /home/runner/bin
+            printf "#!/bin/sh\nexit 0\n" > /home/runner/bin/nix
+            chmod +x /home/runner/bin/nix
+            chown -R runner /home/runner/bin
+            rc=0
+            su runner -c "PATH=/home/runner/bin:/usr/local/bin:/usr/bin:/bin CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_SKIP_VERIFY=1 CHIMNEY_MTA=yes bash /work/install.sh" > /tmp/out 2>&1 || rc=$?
+            cat /tmp/out
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::installer exited $rc after skipping an optional msmtp setup" >&2
+              exit 1
+            fi
+            grep -q "Next steps" /tmp/out
+            test -x /usr/local/bin/chimney-post
+          '
+      # The mail-reading client is documented as a convenience that must only
+      # warn on failure, but apt, zypper and pacman used to install it in the
+      # same transaction as msmtp behind a fatal `|| err`. The real trigger is a
+      # conflicting mailutils; this shims apt-get instead, so the test turns on
+      # the installer behaviour under test rather than on apt resolver
+      # behaviour. /usr/local/sbin is first in sudo secure_path, so the shim is
+      # what $SUDO apt-get finds.
+      - name: A failing optional mail client only warns
+        run: |
+          docker run --rm -v "$PWD/install.sh:/work/install.sh:ro" debian:12 bash -euxc '
+            apt-get update -qq
+            apt-get install -y -qq sudo curl tar ca-certificates
+            cat > /usr/local/sbin/apt-get <<"SHIM"
+          #!/bin/sh
+          for arg in "$@"; do
+            [ "$arg" = "bsd-mailx" ] && exit 100
+          done
+          exec /usr/bin/apt-get "$@"
+          SHIM
+            chmod +x /usr/local/sbin/apt-get
+            useradd -m -s /bin/bash runner
+            echo "runner ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/runner
+            chmod 0440 /etc/sudoers.d/runner
+            rc=0
+            su -s /bin/bash runner -c "CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_SKIP_VERIFY=1 CHIMNEY_MTA=yes bash /work/install.sh" > /tmp/out 2>&1 || rc=$?
+            cat /tmp/out
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::installer exited $rc over the optional mail client" >&2
+              exit 1
+            fi
+            grep -q "Next steps" /tmp/out
+            grep -q "bsd-mailx" /tmp/out
+            # msmtp and its sendmail are what actually matter, and must be there.
+            command -v msmtp
+            test -e /usr/sbin/sendmail
+            test -e /etc/msmtprc
+          '
+      # `command -v systemctl` alone was the guard, so `systemctl daemon-reload`
+      # ran on WSL without systemd enabled, in LXC/chroots and in container
+      # images that merely ship the binaries -- failing with "System has not
+      # been booted with systemd" and taking the installer with it. Both halves
+      # are checked: systemd absent as PID 1 (reload correctly skipped), and
+      # /run/systemd/system present but the reload itself failing.
+      - name: systemd installed but not running does not abort the install
+        run: |
+          docker run --rm -v "$PWD/install.sh:/work/install.sh:ro" debian:12 bash -euxc '
+            apt-get update -qq
+            apt-get install -y -qq sudo curl tar ca-certificates
+            # /usr/local/bin, not /usr/local/sbin: it has to be on the invoking
+            # user PATH (for command -v) as well as sudo secure_path.
+            cat > /usr/local/bin/systemctl <<"SHIM"
+          #!/bin/sh
+          echo "System has not been booted with systemd as init system (PID 1)." >&2
+          exit 1
+          SHIM
+            chmod +x /usr/local/bin/systemctl
+            useradd -m -s /bin/bash runner
+            echo "runner ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/runner
+            chmod 0440 /etc/sudoers.d/runner
+
+            test ! -d /run/systemd/system
+            rc=0
+            su -s /bin/bash runner -c "CHIMNEY_SKIP_VERIFY=1 CHIMNEY_MTA=no bash /work/install.sh" > /tmp/out 2>&1 || rc=$?
+            cat /tmp/out
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::installer exited $rc because systemd is not the running init" >&2
+              exit 1
+            fi
+            grep -q "Next steps" /tmp/out
+            grep -q "not the running init" /tmp/out
+            # The unit is still installed, for whenever this image does boot.
+            test -f /etc/systemd/system/chimney-post.service
+
+            # Now let the reload be attempted, and fail.
+            mkdir -p /run/systemd/system
+            rc=0
+            su -s /bin/bash runner -c "CHIMNEY_SKIP_VERIFY=1 CHIMNEY_MTA=no bash /work/install.sh" > /tmp/out2 2>&1 || rc=$?
+            cat /tmp/out2
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::installer exited $rc over a failed daemon-reload" >&2
+              exit 1
+            fi
+            grep -q "Next steps" /tmp/out2
+            grep -q "daemon-reload failed" /tmp/out2
+          '
 
   # install.sh's msmtp setup supports several OS families beyond Debian/Ubuntu
   # (see the comment above setup_msmtp in install.sh for what's verified where
