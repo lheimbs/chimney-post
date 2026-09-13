@@ -327,6 +327,14 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now chimney-post
 ```
 
+The unit passes `config.toml` to the service with `LoadCredential=` rather than
+reading it from `/etc` directly. `DynamicUser=yes` means the process runs under a
+transient non-root UID that cannot open a `0600` root-owned file, so systemd reads
+it as root at start and hands the service a private read-only copy under `%d`
+(`/run/credentials/chimney-post.service`). That is why `chmod 600` above is both
+safe and sufficient. If you move `config.toml` elsewhere, update the
+`LoadCredential=` path in the unit, not `CHIMNEY_CONFIG`.
+
 The service unit runs with `DynamicUser=yes` and an extensive sandbox: read-only root, private `/tmp` and `/dev`, dropped capabilities, kernel/`/proc` protections, a `@system-service` syscall allow-list, and a restricted set of address families (`systemd-analyze security` rates it ~1.3 "OK"). State data (the E2EE key store and the SQLite queue) is kept under `/var/lib/chimney-post`.
 
 The unit uses `Type=notify`: the service reports **ready** as soon as the SMTP listener is up (so `systemctl start` doesn't block on Matrix), publishes a live `STATUS=` line you can see with `systemctl status` (Matrix connection state + queue/dead-letter depth), and pings the systemd watchdog (`WatchdogSec=120`) so a hung runtime is auto-restarted. It also logs a `warn` when it is queuing mail without a Matrix connection and when messages reach the dead-letter table, so a silent delivery outage is visible in `journalctl`. To be alerted, wire those to your monitoring, e.g. a journald match or an `OnFailure=` mailer unit.
