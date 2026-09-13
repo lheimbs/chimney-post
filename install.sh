@@ -320,12 +320,20 @@ setup_msmtp() {
     apt)
       log "Installing msmtp, msmtp-mta (apt)..."
       $SUDO apt-get update -qq || err "apt-get update failed"
-      $SUDO apt-get install -y msmtp msmtp-mta || err "failed to install msmtp packages"
+      # msmtp's postinst asks a debconf AppArmor question. With a tty attached
+      # (an interactive `sudo bash install.sh` run) debconf's default frontend
+      # can render that as a whiptail/dialog TUI, which -y can't drive and
+      # which this script has no way to navigate -- it just prints raw escape
+      # codes and hangs. `env` (rather than `$SUDO apt-get ...` with the var
+      # merely exported) is needed because sudo's env_reset can otherwise drop
+      # it before apt-get sees it.
+      $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y msmtp msmtp-mta \
+        || err "failed to install msmtp packages"
       # Separate transaction, and only a warning: bsd-mailx conflicts with
       # mailutils, so bundling it in above turned an already-installed mail
       # reader into a hard installer failure.
       log "Installing bsd-mailx (apt)..."
-      $SUDO apt-get install -y bsd-mailx \
+      $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y bsd-mailx \
         || warn "failed to install bsd-mailx (mailx) -- msmtp/sendmail are installed regardless"
       ;;
     dnf) setup_msmtp_dnf dnf ;;
