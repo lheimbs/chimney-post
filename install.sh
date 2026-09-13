@@ -163,11 +163,29 @@ elif command -v systemctl >/dev/null 2>&1; then
   log "Installing systemd unit..."
   curl -fsSL "$RAW_BASE/systemd/chimney-post.service" -o "$WORKDIR/chimney-post.service" \
     || err "failed to download $RAW_BASE/systemd/chimney-post.service"
-  # The unit hardcodes /usr/local/bin; keep it in sync if the binary was
-  # installed somewhere else.
+  # The unit hardcodes both /usr/local/bin and /etc/chimney-post; keep each in
+  # sync if the binary or the config went somewhere else. Every rewrite is
+  # checked afterwards rather than trusted: sed reports success when it matched
+  # nothing, and silently installing a unit that still points at the default
+  # paths would fail later, at `systemctl start`, with a much worse error.
   if [ "$INSTALL_PREFIX" != "/usr/local/bin" ]; then
     sed -i "s|^ExecStart=/usr/local/bin/chimney-post|ExecStart=${INSTALL_PREFIX}/chimney-post|" \
       "$WORKDIR/chimney-post.service"
+    grep -qF "ExecStart=${INSTALL_PREFIX}/chimney-post" "$WORKDIR/chimney-post.service" \
+      || err "could not point the unit's ExecStart at ${INSTALL_PREFIX} -- install /etc/systemd/system/chimney-post.service by hand (see README)"
+  fi
+  if [ "$CONFIG_DIR" != "/etc/chimney-post" ]; then
+    # Two spellings, because install.sh is fetched from main but the unit from
+    # the release tag: current units pass the config as a systemd credential,
+    # units from releases before that set CHIMNEY_CONFIG directly.
+    sed -i \
+      -e "s|^LoadCredential=config:/etc/chimney-post/config.toml|LoadCredential=config:${CONFIG_DIR}/config.toml|" \
+      -e "s|^Environment=CHIMNEY_CONFIG=/etc/chimney-post/config.toml|Environment=CHIMNEY_CONFIG=${CONFIG_DIR}/config.toml|" \
+      "$WORKDIR/chimney-post.service"
+    if ! grep -qF "LoadCredential=config:${CONFIG_DIR}/config.toml" "$WORKDIR/chimney-post.service" \
+       && ! grep -qF "Environment=CHIMNEY_CONFIG=${CONFIG_DIR}/config.toml" "$WORKDIR/chimney-post.service"; then
+      err "could not point the unit at ${CONFIG_DIR}/config.toml -- install /etc/systemd/system/chimney-post.service by hand (see README)"
+    fi
   fi
   $SUDO install -m 0644 "$WORKDIR/chimney-post.service" /etc/systemd/system/chimney-post.service
   $SUDO systemctl daemon-reload

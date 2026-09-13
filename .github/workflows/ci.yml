@@ -116,6 +116,23 @@ jobs:
           CHIMNEY_MTA=no bash install.sh
           # config.toml is 0600 root-owned, so reading it back needs sudo too.
           sudo grep -q "# ci marker" /etc/chimney-post/config.toml
+      # Guards the unit rewrite: a custom CHIMNEY_CONFIG_DIR has to reach the
+      # installed unit, or the service starts up pointing at a config path that
+      # does not exist. Runs before the custom-prefix step below; the later
+      # default-path install restores /etc/systemd/system/chimney-post.service.
+      - name: Custom config dir is propagated into the systemd unit
+        run: |
+          CHIMNEY_CONFIG_DIR="$RUNNER_TEMP/etc" CHIMNEY_MTA=no bash install.sh
+          sudo test -f "$RUNNER_TEMP/etc/config.toml"
+          grep -qF "$RUNNER_TEMP/etc/config.toml" /etc/systemd/system/chimney-post.service
+          # Anchored to directive lines so an explanatory comment mentioning the
+          # default path doesn't read as a failure to rewrite it.
+          if grep -qE '^(LoadCredential=config:|Environment=CHIMNEY_CONFIG=)/etc/chimney-post/config\.toml' \
+              /etc/systemd/system/chimney-post.service; then
+            echo "::error::unit still points at the default config path" >&2
+            exit 1
+          fi
+          systemd-analyze verify /etc/systemd/system/chimney-post.service
       - name: Custom install prefix and CHIMNEY_SKIP_SYSTEMD both work
         run: |
           CHIMNEY_INSTALL_PREFIX="$RUNNER_TEMP/bin" CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_MTA=no bash install.sh
