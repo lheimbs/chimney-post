@@ -137,6 +137,32 @@ jobs:
         run: |
           CHIMNEY_INSTALL_PREFIX="$RUNNER_TEMP/bin" CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_MTA=no bash install.sh
           test -x "$RUNNER_TEMP/bin/chimney-post"
+      # Regression guard for MTA detection. sendmail lives in /usr/sbin, which is
+      # not on a regular user's PATH on Debian <=12, so a bare
+      # `command -v sendmail` reports "no MTA" on a host that has one -- and
+      # answering yes to the prompt then pulls in msmtp-mta, which
+      # Provides/Conflicts mail-transport-agent and uninstalls the real MTA.
+      # PATH is set explicitly rather than left to `su`, whose PATH handling
+      # differs between distros, so the test asserts the same thing everywhere.
+      - name: An MTA outside PATH is still detected
+        run: |
+          docker run --rm -v "$PWD/install.sh:/work/install.sh:ro" debian:12 bash -euxc '
+            apt-get update -qq
+            apt-get install -y -qq sudo curl tar ca-certificates
+            printf "#!/bin/sh\nexit 0\n" > /usr/sbin/sendmail
+            chmod +x /usr/sbin/sendmail
+            useradd -m -s /bin/bash runner
+            echo "runner ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/runner
+            chmod 0440 /etc/sudoers.d/runner
+            out=$(su -s /bin/bash runner -c "PATH=/usr/local/bin:/usr/bin:/bin CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_SKIP_VERIFY=1 bash /work/install.sh" 2>&1)
+            echo "$out"
+            case "$out" in
+              *"already installed"*) ;;
+              *) echo "::error::existing /usr/sbin/sendmail was not detected as an MTA" >&2; exit 1 ;;
+            esac
+            # And nothing replaced it.
+            ! command -v msmtp
+          '
       - name: msmtp setup (apt) installs a working sendmail
         run: |
           CHIMNEY_MTA=yes bash install.sh

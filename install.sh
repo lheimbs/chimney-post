@@ -212,6 +212,26 @@ fi
 # "Sending Mail from Local Tools" section of the README) is a convenience,
 # not required for chimney-post itself, so a failure to install it only
 # warns -- it never blocks getting msmtp/sendmail working.
+# `sendmail` lives in /usr/sbin, which is not on a non-root user's PATH on
+# Debian <=12 or openSUSE (the install-script-mta job below hits the same quirk
+# from the other direction). A bare `command -v sendmail` there reports "no MTA"
+# on a host that already has one -- and getting this wrong is destructive rather
+# than merely noisy: the apt branch installs msmtp-mta, which both Provides and
+# Conflicts mail-transport-agent, so apt removes the running postfix/exim to
+# make room for it. Check the standard locations explicitly.
+have_sendmail() {
+  if command -v sendmail >/dev/null 2>&1; then
+    return 0
+  fi
+  local candidate
+  for candidate in /usr/sbin/sendmail /sbin/sendmail /usr/lib/sendmail; do
+    if [ -x "$candidate" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 detect_pkg_manager() {
   if command -v apt-get >/dev/null 2>&1; then echo apt
   elif command -v dnf >/dev/null 2>&1; then echo dnf
@@ -294,7 +314,7 @@ setup_msmtp() {
       # Arch and can break the system.
       $SUDO pacman -Syu --noconfirm --needed msmtp s-nail \
         || err "failed to install msmtp packages"
-      if ! command -v sendmail >/dev/null 2>&1; then
+      if ! have_sendmail; then
         $SUDO ln -sf "$(command -v msmtp)" /usr/local/bin/sendmail
       fi
       ;;
@@ -332,7 +352,7 @@ EOF
 }
 
 mta_detected=0
-if command -v sendmail >/dev/null 2>&1; then
+if have_sendmail; then
   mta_detected=1
 fi
 
