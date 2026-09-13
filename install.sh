@@ -188,7 +188,21 @@ elif command -v systemctl >/dev/null 2>&1; then
     fi
   fi
   $SUDO install -m 0644 "$WORKDIR/chimney-post.service" /etc/systemd/system/chimney-post.service
-  $SUDO systemctl daemon-reload
+  # The unit file is worth installing wherever systemctl exists -- including
+  # container images being built to run systemd later -- but the reload is only
+  # meaningful when systemd is the running init. WSL without systemd enabled,
+  # LXC/chroots and many container images ship the binaries without PID 1, and
+  # there `daemon-reload` fails with "System has not been booted with systemd";
+  # under `set -e` that aborted the installer after everything was already in
+  # place, swallowing the "Next steps" block. /run/systemd/system exists only
+  # when systemd really is init, so gate on it -- and warn rather than exit if
+  # the reload fails anyway.
+  if [ -d /run/systemd/system ]; then
+    $SUDO systemctl daemon-reload \
+      || warn "systemctl daemon-reload failed -- run it yourself before starting the service"
+  else
+    warn "systemd is not the running init here -- unit installed, but not reloaded. Run 'systemctl daemon-reload' once you boot with systemd."
+  fi
   log "Service unit installed (not started -- fill in ${CONFIG_DIR}/config.toml first, see 'Next steps' below)."
 else
   warn "systemctl not found -- skipping systemd unit installation."
