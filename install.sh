@@ -92,8 +92,10 @@ log "Installing chimney-post ${VERSION} (${TARGET})"
 # and a real directory before the trap is armed, so the trap can never fire
 # `rm -rf` against an empty string or something we didn't create ourselves.
 WORKDIR=$(mktemp -d) || err "failed to create a temporary working directory"
-[ -n "$WORKDIR" ] && [ -d "$WORKDIR" ] || err "mktemp did not return a usable directory"
-trap '[ -n "${WORKDIR:-}" ] && [ -d "$WORKDIR" ] && rm -rf -- "$WORKDIR"' EXIT
+if [ -z "$WORKDIR" ] || [ ! -d "$WORKDIR" ]; then
+  err "mktemp did not return a usable directory"
+fi
+trap 'if [ -n "${WORKDIR:-}" ] && [ -d "$WORKDIR" ]; then rm -rf -- "$WORKDIR"; fi' EXIT
 
 DL_BASE="https://github.com/${REPO}/releases/download/${VERSION}"
 TARBALL="chimney-post-${VERSION}-${TARGET}.tar.gz"
