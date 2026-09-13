@@ -74,6 +74,13 @@ jobs:
   # (not something built from this PR) -- it is a test of the installer's
   # mechanics, not of in-flight source changes.
   install-script:
+    # Skipped on tag pushes. ci.yml is workflow_call-ed by release.yml as the
+    # release gate, and this job installs whatever release is *currently*
+    # published -- so leaving it in that path would gate each release on the
+    # previous release's assets still being downloadable, and would deadlock a
+    # repository's very first release, where there is nothing to install yet.
+    # github.ref is the caller's ref for a called workflow, i.e. refs/tags/vX.Y.Z.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     needs: shellcheck
     runs-on: ubuntu-latest
     steps:
@@ -177,6 +184,11 @@ jobs:
   # here -- it shares setup_msmtp_dnf's logic with the dnf case below, just
   # under a different binary name.
   install-script-mta:
+    # Skipped on tag pushes, same reasoning as install-script above. This one
+    # also pulls four Docker Hub images anonymously from shared GitHub runner
+    # IPs, so keeping it off the release path means a Docker Hub rate limit can
+    # never block publishing a release.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     needs: shellcheck
     runs-on: ubuntu-latest
     strategy:
