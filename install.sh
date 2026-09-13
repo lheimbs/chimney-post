@@ -137,7 +137,7 @@ elif command -v cosign >/dev/null 2>&1; then
     --certificate-github-workflow-repository "${REPO}" \
     || err "cosign signature verification failed -- refusing to install a tarball that doesn't verify against ${REPO}'s release workflow"
 else
-  err "cosign is required to verify the release signature but was not found. Install it from https://docs.sigstore.dev/system_config/installation/ and re-run, or set CHIMNEY_SKIP_VERIFY=1 to install with checksum-only verification (not recommended)."
+  err "cosign is required to verify the release signature but was not found. Install it from https://docs.sigstore.dev/cosign/system_config/installation/ and re-run, or set CHIMNEY_SKIP_VERIFY=1 to install with checksum-only verification (not recommended)."
 fi
 
 log "Installing binary to ${INSTALL_PREFIX}/chimney-post..."
