@@ -62,7 +62,11 @@ if [ "$(id -u)" -eq 0 ]; then
 else
   need_cmd sudo
   log "Some steps need root -- sudo may prompt for your password."
-  sudo -v || err "sudo authentication failed"
+  # A real command, not `sudo -v`: some sudoers configs (e.g. openSUSE's
+  # `targetpw` default) make validate-only `-v` prompt for a password even
+  # under a matching NOPASSWD rule, while an actual command correctly honors
+  # it.
+  sudo true || err "sudo authentication failed"
   SUDO="sudo"
 fi
 
