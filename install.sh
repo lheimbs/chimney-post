@@ -319,11 +319,16 @@ setup_msmtp() {
       fi
       ;;
     nix)
-      setup_msmtp_nix || return
+      # `return 0`, not a bare `return`: setup_msmtp_nix has already warned and
+      # returns 1, and propagating that status makes setup_msmtp fail, which
+      # under `set -e` kills the whole installer -- after the binary, config and
+      # unit are all in place, and before "Next steps" is printed. A skipped
+      # optional MTA is not a failed install.
+      setup_msmtp_nix || return 0
       ;;
     none)
       warn "msmtp setup isn't automated for this OS (no apt-get/dnf/yum/zypper/pacman/nix found). See README for manual instructions."
-      return
+      return 0
       ;;
   esac
 
