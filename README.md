@@ -353,12 +353,26 @@ mailx / cron  ──>  /usr/sbin/sendmail  ──>  SMTP 127.0.0.1:2525  ──>
                    (msmtp)
 ```
 
-### Recommended: `msmtp` (Debian/Ubuntu)
+### Recommended: `msmtp`
 
-`msmtp` is the lightest option: no daemon, no spool, a single binary. The `msmtp-mta` package installs the `/usr/sbin/sendmail` symlink that mailx and cron expect.
+`msmtp` is the lightest option: no daemon, no spool, a single binary. `install.sh` (see [Quick Install](#quick-install-linux)) automates this step across Debian/Ubuntu, Fedora, RHEL-family (via EPEL), openSUSE, Arch, and (best-effort) Nix -- run it with `CHIMNEY_MTA=yes` to set msmtp up without the interactive prompt. The commands below are the manual equivalent, package names vary by distro:
 
 ```bash
+# Debian/Ubuntu -- msmtp-mta installs the /usr/sbin/sendmail symlink mailx/cron expect
 sudo apt install msmtp msmtp-mta bsd-mailx
+
+# Fedora -- msmtp itself ships /usr/bin/sendmail directly
+sudo dnf install msmtp s-nail
+
+# RHEL/CentOS/Rocky/Alma -- msmtp is in EPEL and registers itself via `alternatives`
+sudo dnf install epel-release && sudo dnf install msmtp s-nail
+
+# openSUSE
+sudo zypper install msmtp msmtp-mta mailx
+
+# Arch -- msmtp ships no sendmail-compatible symlink; create one yourself
+sudo pacman -S msmtp s-nail
+sudo ln -sf "$(command -v msmtp)" /usr/local/bin/sendmail
 ```
 
 `/etc/msmtprc`:

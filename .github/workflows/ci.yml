@@ -120,3 +120,58 @@ jobs:
         run: |
           CHIMNEY_INSTALL_PREFIX="$RUNNER_TEMP/bin" CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_MTA=no bash install.sh
           test -x "$RUNNER_TEMP/bin/chimney-post"
+      - name: msmtp setup (apt) installs a working sendmail
+        run: |
+          CHIMNEY_MTA=yes bash install.sh
+          command -v sendmail
+          sudo test -e /etc/msmtprc
+
+  # install.sh's msmtp setup supports several OS families beyond Debian/Ubuntu
+  # (see the comment above setup_msmtp in install.sh for what's verified where
+  # and why). GitHub-hosted runners only come as Ubuntu, so those other
+  # families are exercised in disposable containers on top of the ubuntu-latest
+  # runner instead of as native runners. yum-only RHEL (pre-8) isn't covered
+  # here -- it shares setup_msmtp_dnf's logic with the dnf case below, just
+  # under a different binary name.
+  install-script-mta:
+    needs: shellcheck
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: arch
+            image: archlinux:latest
+            bootstrap: pacman -Sy --noconfirm --needed sudo curl tar coreutils which
+          - name: fedora
+            image: fedora:latest
+            # util-linux for `su` -- this base image doesn't include it.
+            bootstrap: dnf -y install sudo curl tar coreutils which util-linux
+          - name: rhel (rockylinux, via EPEL)
+            image: rockylinux:9
+            # curl/coreutils here are the -minimal/-single variants the base
+            # image already ships; installing the full packages alongside
+            # them conflicts (see setup_msmtp_dnf's EPEL handling for msmtp
+            # itself, exercised by this job).
+            bootstrap: dnf -y install sudo tar which
+          - name: opensuse
+            image: opensuse/tumbleweed:latest
+            bootstrap: zypper --non-interactive install sudo curl tar coreutils which
+    steps:
+      - uses: actions/checkout@v7
+      - name: "${{ matrix.name }}: msmtp setup installs a working sendmail"
+        run: |
+          docker run --rm -v "$PWD/install.sh:/work/install.sh:ro" "${{ matrix.image }}" bash -euxc '
+            ${{ matrix.bootstrap }}
+            curl -fsSL -o /usr/local/bin/cosign https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64
+            chmod +x /usr/local/bin/cosign
+            useradd -m -s /bin/bash runner
+            echo "runner ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/runner
+            chmod 0440 /etc/sudoers.d/runner
+            su -s /bin/bash runner -c "CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_MTA=yes bash /work/install.sh"
+            # Checked as root, not via su: a non-login su on some distros
+            # (openSUSE) strips PATH down to exclude /usr/sbin, where sendmail
+            # lives -- a test-harness quirk, not something a real login shell hits.
+            command -v sendmail
+            test -e /etc/msmtprc
+          '
