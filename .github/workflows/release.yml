@@ -27,6 +27,9 @@ env:
 jobs:
   # Gate the whole release on the same checks main gets. Tag pushes don't
   # trigger ci.yml on their own, so it's invoked here as a reusable workflow.
+  # ci.yml's install-script jobs skip themselves on a tag ref: they install the
+  # currently-published release, which has nothing to do with the commit being
+  # released and would make each release depend on the previous one.
   ci:
     uses: ./.github/workflows/ci.yml
     permissions:

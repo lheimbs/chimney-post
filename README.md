@@ -70,9 +70,33 @@ This is essentially a super narrow version of [mailrise](https://github.com/YoRy
 - A Matrix account for the bot
 - A Matrix room where the bot should post (invite the bot user to the room)
 
+### Quick Install (Linux)
+
+The install script downloads the latest signed release for your architecture, verifies its checksum and cosign/sigstore signature, installs the binary, writes a template `config.toml`, and installs the systemd unit (see [Running as a systemd Service](#running-as-a-systemd-service)). It also offers to set up `msmtp` (see [Sending Mail from Local Tools](#sending-mail-from-local-tools-mailx-cron-apticron-)) if no MTA is detected.
+
+Run it as a regular user, not with `sudo`: the script calls `sudo` itself for the specific steps that need root (installing the binary, config, and systemd unit) and will prompt for your password when it gets there.
+
+Review [`install.sh`](install.sh) before running it, as with any script piped into a shell:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lheimbs/chimney-post/main/install.sh | bash
+```
+
+Requires [cosign](https://docs.sigstore.dev/system_config/installation/) v3+ to be installed for signature verification (recommended -- see [Pre-built Binaries](#pre-built-binaries) below for why). The script is configurable via environment variables; see the comment header of `install.sh` for the full list, e.g.:
+
+```bash
+# Install a specific version, skip the systemd unit, and skip the MTA prompt
+curl -fsSL https://raw.githubusercontent.com/lheimbs/chimney-post/main/install.sh \
+  | CHIMNEY_VERSION=v0.1.0 CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_MTA=no bash
+```
+
+It never overwrites an existing `config.toml` or `/etc/msmtprc`, and is safe to re-run to upgrade the binary and unit file in place.
+
+On Arch, accepting the `msmtp` offer runs a full `pacman -Syu`, which upgrades every package on the system — partial upgrades are unsupported there. Set `CHIMNEY_MTA=no` if you would rather install it yourself.
+
 ### Pre-built Binaries
 
-Release binaries for `x86_64` and `aarch64` Linux are published on the [Releases page](https://github.com/lheimbs/chimney-post/releases).
+Release binaries for `x86_64` and `aarch64` Linux are published on the [Releases page](https://github.com/lheimbs/chimney-post/releases). This section documents the manual steps that `install.sh` above automates, useful if you want to inspect each step yourself.
 Each release tarball is signed with a cosign keyless signature (sigstore) and carries SLSA build provenance attested via GitHub Actions OIDC.
 
 Binaries are built on Ubuntu 24.04 and dynamically link glibc 2.39, so they run on Ubuntu 24.04+, Debian 13+, and anything else with glibc 2.39 or newer. On older distributions — including Debian 12 (glibc 2.36) and Ubuntu 22.04 (2.35) — build from source instead.
@@ -305,6 +329,14 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now chimney-post
 ```
 
+The unit passes `config.toml` to the service with `LoadCredential=` rather than
+reading it from `/etc` directly. `DynamicUser=yes` means the process runs under a
+transient non-root UID that cannot open a `0600` root-owned file, so systemd reads
+it as root at start and hands the service a private read-only copy under `%d`
+(`/run/credentials/chimney-post.service`). That is why `chmod 600` above is both
+safe and sufficient. If you move `config.toml` elsewhere, update the
+`LoadCredential=` path in the unit, not `CHIMNEY_CONFIG`.
+
 The service unit runs with `DynamicUser=yes` and an extensive sandbox: read-only root, private `/tmp` and `/dev`, dropped capabilities, kernel/`/proc` protections, a `@system-service` syscall allow-list, and a restricted set of address families (`systemd-analyze security` rates it ~1.3 "OK"). State data (the E2EE key store and the SQLite queue) is kept under `/var/lib/chimney-post`.
 
 The unit uses `Type=notify`: the service reports **ready** as soon as the SMTP listener is up (so `systemctl start` doesn't block on Matrix), publishes a live `STATUS=` line you can see with `systemctl status` (Matrix connection state + queue/dead-letter depth), and pings the systemd watchdog (`WatchdogSec=120`) so a hung runtime is auto-restarted. It also logs a `warn` when it is queuing mail without a Matrix connection and when messages reach the dead-letter table, so a silent delivery outage is visible in `journalctl`. To be alerted, wire those to your monitoring, e.g. a journald match or an `OnFailure=` mailer unit.
@@ -331,12 +363,26 @@ mailx / cron  ──>  /usr/sbin/sendmail  ──>  SMTP 127.0.0.1:2525  ──>
                    (msmtp)
 ```
 
-### Recommended: `msmtp` (Debian/Ubuntu)
+### Recommended: `msmtp`
 
-`msmtp` is the lightest option: no daemon, no spool, a single binary. The `msmtp-mta` package installs the `/usr/sbin/sendmail` symlink that mailx and cron expect.
+`msmtp` is the lightest option: no daemon, no spool, a single binary. `install.sh` (see [Quick Install](#quick-install-linux)) automates this step across Debian/Ubuntu, Fedora, RHEL-family (via EPEL), openSUSE, Arch, and (best-effort) Nix -- run it with `CHIMNEY_MTA=yes` to set msmtp up without the interactive prompt. The commands below are the manual equivalent, package names vary by distro:
 
 ```bash
+# Debian/Ubuntu -- msmtp-mta installs the /usr/sbin/sendmail symlink mailx/cron expect
 sudo apt install msmtp msmtp-mta bsd-mailx
+
+# Fedora -- msmtp itself ships /usr/bin/sendmail directly
+sudo dnf install msmtp s-nail
+
+# RHEL/CentOS/Rocky/Alma -- msmtp is in EPEL and registers itself via `alternatives`
+sudo dnf install epel-release && sudo dnf install msmtp s-nail
+
+# openSUSE
+sudo zypper install msmtp msmtp-mta mailx
+
+# Arch -- msmtp ships no sendmail-compatible symlink; create one yourself
+sudo pacman -S msmtp s-nail
+sudo ln -sf "$(command -v msmtp)" /usr/local/bin/sendmail
 ```
 
 `/etc/msmtprc`:
@@ -350,7 +396,8 @@ syslog on
 account chimney
 host    127.0.0.1
 port    2525
-from    %U@%H        # e.g. root@myserver -- Chimney Post reads this as the From header
+# e.g. root@myserver -- Chimney Post reads this as the From header
+from    %U@%H
 
 account default : chimney
 ```
@@ -369,11 +416,11 @@ Without any `[[matrix.routes]]` rules the recipient address is just a placeholde
 
 If you want a second layer of durability across Chimney Post restarts, use a queuing relay instead of `msmtp`:
 
-| Option       | Daemon | Local queue | Notes                                            |
-|--------------|--------|-------------|--------------------------------------------------|
-| **msmtp**    | no     | no          | Simplest; fine given Chimney Post's own queue.   |
-| **nullmailer** | yes  | yes         | Tiny; spools locally and retries to the relay.   |
-| **dma**      | no     | yes         | Queues; flushes on submission and via cron.      |
+| Option         | Daemon | Local queue | Notes                                            |
+|----------------|--------|-------------|--------------------------------------------------|
+| **msmtp**      | no     | no          | Simplest; fine given Chimney Post's own queue.   |
+| **nullmailer** | yes    | yes         | Tiny; spools locally and retries to the relay.   |
+| **dma**        | no     | yes         | Queues; flushes on submission and via cron.      |
 
 Start with `msmtp`; reach for `nullmailer` only if you actually observe mail lost during restarts.
 

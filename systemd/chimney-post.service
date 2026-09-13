@@ -19,7 +19,16 @@ RestartSec=5
 WatchdogSec=120
 # Provide MATRIX_PASSWORD / MATRIX_ACCESS_TOKEN here (file mode 0600), e.g.:
 #   EnvironmentFile=/etc/chimney-post/chimney-post.env
-Environment=CHIMNEY_CONFIG=/etc/chimney-post/config.toml
+#
+# The config is passed as a credential rather than read from /etc directly:
+# DynamicUser=yes (below) runs the service under a transient non-root UID, which
+# cannot open a 0600 root-owned config.toml. LoadCredential= has systemd read the
+# file as root at start and expose a private read-only copy under the unit's
+# credentials directory (%d, i.e. /run/credentials/chimney-post.service), so
+# config.toml can stay 0600 root:root and still be readable by the service.
+# Requires systemd 250+ for the %d specifier.
+LoadCredential=config:/etc/chimney-post/config.toml
+Environment=CHIMNEY_CONFIG=%d/config
 
 # Give the worker time to drain ready messages on stop (matches the app's
 # internal 30s drain). Undelivered mail stays in the persistent queue regardless.
