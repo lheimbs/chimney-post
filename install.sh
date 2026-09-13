@@ -87,15 +87,20 @@ if [ -z "$VERSION" ]; then
 fi
 log "Installing chimney-post ${VERSION} (${TARGET})"
 
-TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"' EXIT
+# A local WORKDIR (not TMPDIR) so this never shadows the environment
+# variable of that name mktemp/tar/etc. themselves consult. Verified non-empty
+# and a real directory before the trap is armed, so the trap can never fire
+# `rm -rf` against an empty string or something we didn't create ourselves.
+WORKDIR=$(mktemp -d) || err "failed to create a temporary working directory"
+[ -n "$WORKDIR" ] && [ -d "$WORKDIR" ] || err "mktemp did not return a usable directory"
+trap '[ -n "${WORKDIR:-}" ] && [ -d "$WORKDIR" ] && rm -rf -- "$WORKDIR"' EXIT
 
 DL_BASE="https://github.com/${REPO}/releases/download/${VERSION}"
 TARBALL="chimney-post-${VERSION}-${TARGET}.tar.gz"
 
 fetch() {
-  # $1 = URL, $2 = destination filename in $TMPDIR
-  curl -fsSL "$1" -o "$TMPDIR/$2" || err "failed to download $1"
+  # $1 = URL, $2 = destination filename in $WORKDIR
+  curl -fsSL "$1" -o "$WORKDIR/$2" || err "failed to download $1"
 }
 
 log "Downloading release assets..."
@@ -104,15 +109,15 @@ fetch "$DL_BASE/$TARBALL.bundle" "$TARBALL.bundle"
 fetch "$DL_BASE/SHA256SUMS" "SHA256SUMS"
 
 log "Verifying checksum..."
-( cd "$TMPDIR" && sha256sum -c SHA256SUMS --ignore-missing ) \
+( cd "$WORKDIR" && sha256sum -c SHA256SUMS --ignore-missing ) \
   || err "checksum verification failed -- downloaded file does not match SHA256SUMS"
 
 if [ "$SKIP_VERIFY" = "1" ]; then
   warn "CHIMNEY_SKIP_VERIFY=1 -- skipping cosign signature verification. Only the checksum was checked, which proves the download wasn't corrupted, NOT that it came from the real release workflow."
 elif command -v cosign >/dev/null 2>&1; then
   log "Verifying cosign signature..."
-  cosign verify-blob "$TMPDIR/$TARBALL" \
-    --bundle "$TMPDIR/$TARBALL.bundle" \
+  cosign verify-blob "$WORKDIR/$TARBALL" \
+    --bundle "$WORKDIR/$TARBALL.bundle" \
     --certificate-identity "https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/${VERSION}" \
     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
     --certificate-github-workflow-repository "${REPO}" \
@@ -122,9 +127,9 @@ else
 fi
 
 log "Installing binary to ${INSTALL_PREFIX}/chimney-post..."
-tar -xzf "$TMPDIR/$TARBALL" -C "$TMPDIR" chimney-post
+tar -xzf "$WORKDIR/$TARBALL" -C "$WORKDIR" chimney-post
 $SUDO install -d -m 0755 "$INSTALL_PREFIX"
-$SUDO install -m 0755 -o root -g root "$TMPDIR/chimney-post" "$INSTALL_PREFIX/chimney-post"
+$SUDO install -m 0755 -o root -g root "$WORKDIR/chimney-post" "$INSTALL_PREFIX/chimney-post"
 
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/${VERSION}"
 
@@ -141,24 +146,24 @@ if $SUDO test -e "$CONFIG_DIR/config.toml"; then
 else
   log "Writing template config to ${CONFIG_DIR}/config.toml..."
   fetch_config_url="$RAW_BASE/config.example.toml"
-  curl -fsSL "$fetch_config_url" -o "$TMPDIR/config.toml" \
+  curl -fsSL "$fetch_config_url" -o "$WORKDIR/config.toml" \
     || err "failed to download $fetch_config_url"
-  $SUDO install -m 0600 "$TMPDIR/config.toml" "$CONFIG_DIR/config.toml"
+  $SUDO install -m 0600 "$WORKDIR/config.toml" "$CONFIG_DIR/config.toml"
 fi
 
 if [ "$SKIP_SYSTEMD" = "1" ]; then
   log "CHIMNEY_SKIP_SYSTEMD=1 -- skipping systemd unit installation."
 elif command -v systemctl >/dev/null 2>&1; then
   log "Installing systemd unit..."
-  curl -fsSL "$RAW_BASE/systemd/chimney-post.service" -o "$TMPDIR/chimney-post.service" \
+  curl -fsSL "$RAW_BASE/systemd/chimney-post.service" -o "$WORKDIR/chimney-post.service" \
     || err "failed to download $RAW_BASE/systemd/chimney-post.service"
   # The unit hardcodes /usr/local/bin; keep it in sync if the binary was
   # installed somewhere else.
   if [ "$INSTALL_PREFIX" != "/usr/local/bin" ]; then
     sed -i "s|^ExecStart=/usr/local/bin/chimney-post|ExecStart=${INSTALL_PREFIX}/chimney-post|" \
-      "$TMPDIR/chimney-post.service"
+      "$WORKDIR/chimney-post.service"
   fi
-  $SUDO install -m 0644 "$TMPDIR/chimney-post.service" /etc/systemd/system/chimney-post.service
+  $SUDO install -m 0644 "$WORKDIR/chimney-post.service" /etc/systemd/system/chimney-post.service
   $SUDO systemctl daemon-reload
   log "Service unit installed (not started -- fill in ${CONFIG_DIR}/config.toml first, see 'Next steps' below)."
 else
@@ -183,7 +188,7 @@ setup_msmtp() {
   # Matches the smtp.bind port in config.example.toml (2525); adjust
   # /etc/msmtprc yourself if you changed [smtp].bind.
   log "Writing /etc/msmtprc..."
-  cat > "$TMPDIR/msmtprc" <<'EOF'
+  cat > "$WORKDIR/msmtprc" <<'EOF'
 defaults
 auth   off
 tls    off
@@ -196,7 +201,7 @@ from    %U@%H
 
 account default : chimney
 EOF
-  $SUDO install -m 0644 "$TMPDIR/msmtprc" /etc/msmtprc
+  $SUDO install -m 0644 "$WORKDIR/msmtprc" /etc/msmtprc
 }
 
 mta_detected=0
