@@ -87,7 +87,15 @@ if [ -z "$VERSION" ]; then
   # rate limit and needs no JSON parsing: it 302s straight to .../tag/<tag>.
   latest_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest")
   VERSION="${latest_url##*/}"
-  [ -n "$VERSION" ] || err "could not resolve the latest release tag"
+  # Sanity-check the result rather than just testing it for emptiness. With no
+  # published release the redirect lands on the releases index instead of
+  # .../tag/<tag>, so VERSION becomes the literal string "releases" -- non-empty,
+  # and it would otherwise sail on into a 404 download URL and a nonsense cosign
+  # --certificate-identity.
+  case "$VERSION" in
+    v[0-9]*) ;;
+    *) err "could not resolve the latest release tag (got '$VERSION' from ${latest_url}) -- set CHIMNEY_VERSION to a release tag such as v0.1.0" ;;
+  esac
 fi
 log "Installing chimney-post ${VERSION} (${TARGET})"
 
