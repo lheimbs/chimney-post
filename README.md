@@ -92,6 +92,8 @@ curl -fsSL https://raw.githubusercontent.com/lheimbs/chimney-post/main/install.s
 
 It never overwrites an existing `config.toml` or `/etc/msmtprc`, and is safe to re-run to upgrade the binary and unit file in place.
 
+On Arch, accepting the `msmtp` offer runs a full `pacman -Syu`, which upgrades every package on the system — partial upgrades are unsupported there. Set `CHIMNEY_MTA=no` if you would rather install it yourself.
+
 ### Pre-built Binaries
 
 Release binaries for `x86_64` and `aarch64` Linux are published on the [Releases page](https://github.com/lheimbs/chimney-post/releases). This section documents the manual steps that `install.sh` above automates, useful if you want to inspect each step yourself.

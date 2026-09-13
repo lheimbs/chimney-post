@@ -339,10 +339,13 @@ setup_msmtp() {
         || warn "failed to install mailx -- msmtp/sendmail are installed regardless"
       ;;
     pacman)
-      log "Installing msmtp (pacman)..."
       # Full -Syu, not just -Sy: partial upgrades (syncing the database
       # without upgrading already-installed packages) are unsupported on
-      # Arch and can break the system.
+      # Arch and can break the system. That makes installing msmtp here a
+      # whole-system upgrade, which is a much bigger thing to do to someone's
+      # machine than the "install msmtp?" prompt implies -- so say so plainly
+      # before it runs rather than leaving them to find out from the output.
+      log "Installing msmtp (pacman). Note: this runs a full 'pacman -Syu', which upgrades every package on this system -- partial upgrades are unsupported on Arch."
       $SUDO pacman -Syu --noconfirm --needed msmtp \
         || err "failed to install msmtp packages"
       # Plain -S: the database was just synced and the system just upgraded,
