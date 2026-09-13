@@ -177,14 +177,117 @@ else
 fi
 
 # --- Optional MTA setup (msmtp) ---------------------------------------------
-setup_msmtp() {
-  if ! command -v apt-get >/dev/null 2>&1; then
-    warn "msmtp setup is currently only automated for Debian/Ubuntu (apt-get not found). See README for manual instructions for your distro."
-    return
+# Package names/behavior below are each verified against the real repos (not
+# just guessed from memory):
+#   - apt (Debian/Ubuntu): msmtp-mta installs the /usr/sbin/sendmail symlink.
+#   - dnf/yum (Fedora): msmtp itself ships /usr/bin/sendmail directly.
+#   - dnf/yum (RHEL/CentOS/Rocky/Alma, via EPEL): msmtp's postinstall
+#     registers itself via `alternatives` as the mta automatically.
+#   - zypper (openSUSE): msmtp-mta installs the /usr/sbin/sendmail symlink,
+#     same division of labor as Debian.
+#   - pacman (Arch): msmtp ships no sendmail-compatible symlink at all (see
+#     its own usr/share/doc/msmtp/set_sendmail/ -- upstream expects you to do
+#     this yourself), so this creates one.
+#   - nix: nixpkgs' msmtp ships its own sendmail wrapper inside the package,
+#     just not necessarily somewhere already on root's PATH.
+# `s-nail`/`mailx` (the interactive mail-reading/testing client from the
+# "Sending Mail from Local Tools" section of the README) is a convenience,
+# not required for chimney-post itself, so a failure to install it only
+# warns -- it never blocks getting msmtp/sendmail working.
+detect_pkg_manager() {
+  if command -v apt-get >/dev/null 2>&1; then echo apt
+  elif command -v dnf >/dev/null 2>&1; then echo dnf
+  elif command -v yum >/dev/null 2>&1; then echo yum
+  elif command -v zypper >/dev/null 2>&1; then echo zypper
+  elif command -v pacman >/dev/null 2>&1; then echo pacman
+  elif command -v nix >/dev/null 2>&1; then echo nix
+  else echo none
   fi
-  log "Installing msmtp, msmtp-mta, bsd-mailx..."
-  $SUDO apt-get update -qq || err "apt-get update failed"
-  $SUDO apt-get install -y msmtp msmtp-mta bsd-mailx || err "failed to install msmtp packages"
+}
+
+is_fedora() {
+  # Fedora ships msmtp directly and has no epel-release package; RHEL-family
+  # (Rocky/Alma/CentOS/RHEL itself) needs EPEL enabled first. Subshell so
+  # sourcing os-release doesn't leak its variables into the rest of the script.
+  # shellcheck disable=SC1091 # dynamic path, deliberately not followed
+  ( . /etc/os-release 2>/dev/null && [ "${ID:-}" = "fedora" ] )
+}
+
+setup_msmtp_dnf() {
+  local pkg_mgr="$1"
+  if ! is_fedora; then
+    $SUDO "$pkg_mgr" install -y epel-release \
+      || warn "could not enable EPEL -- msmtp install may fail on RHEL-family without it"
+  fi
+  log "Installing msmtp ($pkg_mgr)..."
+  $SUDO "$pkg_mgr" install -y msmtp || err "failed to install msmtp"
+  log "Installing s-nail (mailx-compatible, $pkg_mgr)..."
+  $SUDO "$pkg_mgr" install -y s-nail \
+    || warn "failed to install s-nail (mailx) -- msmtp/sendmail are installed regardless"
+}
+
+setup_msmtp_nix() {
+  if ! $SUDO sh -c 'command -v nix' >/dev/null 2>&1; then
+    warn "nix is available for your user but not for root -- msmtp setup for nix isn't automated in that case. See README for manual steps."
+    return 1
+  fi
+  log "Installing msmtp via nix (best-effort)..."
+  if ! $SUDO nix --extra-experimental-features 'nix-command flakes' profile install nixpkgs#msmtp; then
+    warn "'nix profile install nixpkgs#msmtp' failed -- skipping msmtp setup. See README for manual steps."
+    return 1
+  fi
+  local sendmail_path candidate
+  sendmail_path=$($SUDO sh -c 'command -v sendmail' 2>/dev/null || true)
+  if [ -z "$sendmail_path" ]; then
+    for candidate in /root/.nix-profile/bin/sendmail /nix/var/nix/profiles/default/bin/sendmail; do
+      if $SUDO test -e "$candidate"; then
+        sendmail_path="$candidate"
+        break
+      fi
+    done
+  fi
+  if [ -z "$sendmail_path" ]; then
+    warn "installed msmtp via nix but couldn't locate its sendmail wrapper -- see README for manual steps."
+    return 1
+  fi
+  # /usr/local/bin is on PATH essentially everywhere, unlike root's nix
+  # profile bin dir, which may not be without extra shell setup.
+  $SUDO ln -sf "$sendmail_path" /usr/local/bin/sendmail
+}
+
+setup_msmtp() {
+  case "$(detect_pkg_manager)" in
+    apt)
+      log "Installing msmtp, msmtp-mta, bsd-mailx (apt)..."
+      $SUDO apt-get update -qq || err "apt-get update failed"
+      $SUDO apt-get install -y msmtp msmtp-mta bsd-mailx || err "failed to install msmtp packages"
+      ;;
+    dnf) setup_msmtp_dnf dnf ;;
+    yum) setup_msmtp_dnf yum ;;
+    zypper)
+      log "Installing msmtp, msmtp-mta, mailx (zypper)..."
+      $SUDO zypper --non-interactive install msmtp msmtp-mta mailx \
+        || err "failed to install msmtp packages"
+      ;;
+    pacman)
+      log "Installing msmtp, s-nail (mailx-compatible, pacman)..."
+      # Full -Syu, not just -Sy: partial upgrades (syncing the database
+      # without upgrading already-installed packages) are unsupported on
+      # Arch and can break the system.
+      $SUDO pacman -Syu --noconfirm --needed msmtp s-nail \
+        || err "failed to install msmtp packages"
+      if ! command -v sendmail >/dev/null 2>&1; then
+        $SUDO ln -sf "$(command -v msmtp)" /usr/local/bin/sendmail
+      fi
+      ;;
+    nix)
+      setup_msmtp_nix || return
+      ;;
+    none)
+      warn "msmtp setup isn't automated for this OS (no apt-get/dnf/yum/zypper/pacman/nix found). See README for manual instructions."
+      return
+      ;;
+  esac
 
   if $SUDO test -e /etc/msmtprc; then
     log "Leaving existing /etc/msmtprc in place."
