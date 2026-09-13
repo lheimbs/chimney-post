@@ -296,24 +296,38 @@ setup_msmtp_nix() {
 setup_msmtp() {
   case "$(detect_pkg_manager)" in
     apt)
-      log "Installing msmtp, msmtp-mta, bsd-mailx (apt)..."
+      log "Installing msmtp, msmtp-mta (apt)..."
       $SUDO apt-get update -qq || err "apt-get update failed"
-      $SUDO apt-get install -y msmtp msmtp-mta bsd-mailx || err "failed to install msmtp packages"
+      $SUDO apt-get install -y msmtp msmtp-mta || err "failed to install msmtp packages"
+      # Separate transaction, and only a warning: bsd-mailx conflicts with
+      # mailutils, so bundling it in above turned an already-installed mail
+      # reader into a hard installer failure.
+      log "Installing bsd-mailx (apt)..."
+      $SUDO apt-get install -y bsd-mailx \
+        || warn "failed to install bsd-mailx (mailx) -- msmtp/sendmail are installed regardless"
       ;;
     dnf) setup_msmtp_dnf dnf ;;
     yum) setup_msmtp_dnf yum ;;
     zypper)
-      log "Installing msmtp, msmtp-mta, mailx (zypper)..."
-      $SUDO zypper --non-interactive install msmtp msmtp-mta mailx \
+      log "Installing msmtp, msmtp-mta (zypper)..."
+      $SUDO zypper --non-interactive install msmtp msmtp-mta \
         || err "failed to install msmtp packages"
+      log "Installing mailx (zypper)..."
+      $SUDO zypper --non-interactive install mailx \
+        || warn "failed to install mailx -- msmtp/sendmail are installed regardless"
       ;;
     pacman)
-      log "Installing msmtp, s-nail (mailx-compatible, pacman)..."
+      log "Installing msmtp (pacman)..."
       # Full -Syu, not just -Sy: partial upgrades (syncing the database
       # without upgrading already-installed packages) are unsupported on
       # Arch and can break the system.
-      $SUDO pacman -Syu --noconfirm --needed msmtp s-nail \
+      $SUDO pacman -Syu --noconfirm --needed msmtp \
         || err "failed to install msmtp packages"
+      # Plain -S: the database was just synced and the system just upgraded,
+      # so this is not a partial upgrade.
+      log "Installing s-nail (mailx-compatible, pacman)..."
+      $SUDO pacman -S --noconfirm --needed s-nail \
+        || warn "failed to install s-nail (mailx) -- msmtp/sendmail are installed regardless"
       if ! have_sendmail; then
         $SUDO ln -sf "$(command -v msmtp)" /usr/local/bin/sendmail
       fi
