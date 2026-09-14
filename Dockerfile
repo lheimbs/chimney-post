@@ -19,7 +19,13 @@
 # needed here: `cargo build --release` already targets the host the builder
 # stage is running on.
 
-FROM rust:1.93-bookworm AS builder
+# Base images are pinned by digest, not tag, for the same reason release.yml
+# refuses a build cache: this image is cosign-signed and carries a SLSA
+# attestation, so a retagged or compromised upstream would otherwise yield a
+# compromised binary with a perfectly valid signature. Both digests are
+# multi-arch indexes, so each native runner still resolves its own
+# architecture. Update them deliberately, the way Action pins are updated.
+FROM rust:1.93-bookworm@sha256:7c4ae649a84014c467d79319bbf17ce2632ae8b8be123ac2fb2ea5be46823f31 AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
@@ -29,7 +35,7 @@ RUN cargo build --release --locked
 # stage runs as -- distroless has no shell to mkdir/chown at runtime.
 RUN mkdir -p /rootfs/etc/chimney-post /rootfs/var/lib/chimney-post
 
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
 COPY --from=builder --chown=65532:65532 /rootfs/etc/chimney-post /etc/chimney-post
 COPY --from=builder --chown=65532:65532 /rootfs/var/lib/chimney-post /var/lib/chimney-post
 COPY --from=builder /build/target/release/chimney-post /usr/local/bin/chimney-post
