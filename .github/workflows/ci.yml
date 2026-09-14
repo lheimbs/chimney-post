@@ -72,6 +72,13 @@ jobs:
   # hold: runs as the declared non-root UID, has no shell at all, and the
   # SMTP server actually comes up and accepts connections.
   docker-image:
+    # Skipped on tag pushes, same reasoning as the install-script jobs below:
+    # this pulls rust:1.93-bookworm anonymously from Docker Hub on shared
+    # GitHub runner IPs, so leaving it on the release path would let a Docker
+    # Hub rate limit block publishing a release. Nothing is lost there --
+    # release.yml's docker-build-push builds this same Dockerfile from the
+    # same commit.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -151,18 +158,25 @@ jobs:
             -v "$RUNNER_TEMP/config.toml:/etc/chimney-post/config.toml:ro" \
             -e MATRIX_PASSWORD=dummy \
             chimney-post:ci
+          # Read the actual SMTP greeting rather than just checking that a
+          # connection can be opened. `nc -z` completes docker-proxy's
+          # host-side handshake even when nothing usable is behind it -- a
+          # container bound to the *container's* own 127.0.0.1, or one that
+          # already crashed, both still accept and then close with zero
+          # bytes. Requiring a 220 banner is what actually proves the SMTP
+          # server is listening on an address reachable from outside.
           ok=0
           for _ in $(seq 1 10); do
-            nc -z 127.0.0.1 12525 && { ok=1; break; }
+            if printf 'QUIT\r\n' | nc -w 3 127.0.0.1 12525 | grep -q '^220 '; then
+              ok=1
+              break
+            fi
             sleep 1
           done
           docker logs cp-ci
-          # A crashed container can still let a stray connection through
-          # during docker's port-forward teardown, so nc succeeding alone
-          # isn't proof -- also require the container to still be running.
           status="$(docker inspect -f '{{.State.Status}}' cp-ci)"
           if [ "$ok" -ne 1 ] || [ "$status" != "running" ]; then
-            echo "::error::SMTP port never answered, or container exited (status: $status)" >&2
+            echo "::error::no SMTP 220 greeting, or container exited (status: $status)" >&2
             exit 1
           fi
           docker rm -f cp-ci >/dev/null
