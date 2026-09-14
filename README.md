@@ -354,6 +354,42 @@ sudo systemctl edit chimney-post
 Environment=MATRIX_PASSWORD=your-secret
 ```
 
+## Running with Docker
+
+A multi-arch (amd64/arm64) image is published to GHCR:
+
+```bash
+docker run -d --name chimney-post \
+  -v "$PWD/config.toml:/etc/chimney-post/config.toml:ro" \
+  -v chimney-post-data:/var/lib/chimney-post \
+  -e MATRIX_PASSWORD=your-secret \
+  -p 127.0.0.1:2525:2525 \
+  ghcr.io/lheimbs/chimney-post:latest
+```
+
+- `config.toml` is bind-mounted read-only; `CHIMNEY_CONFIG` already points at
+  `/etc/chimney-post/config.toml` in the image, so no extra env var is needed unless
+  you mount it somewhere else. Secrets referenced as `${MATRIX_PASSWORD}` /
+  `${MATRIX_ACCESS_TOKEN}` in the config come from `-e`/`--env-file`, same as the
+  systemd unit -- never bake them into the image or the config file itself.
+- `/var/lib/chimney-post` holds the SQLite outbox and the Matrix E2EE key store and
+  must be a persistent volume; without it, mail queued between restarts and the
+  encryption identity are both lost.
+- The image is `FROM scratch` (chiseled from Ubuntu 24.04 packages with
+  [`chisel`](https://github.com/canonical/chisel), see `Dockerfile`) -- no shell, no
+  package manager, runs as a fixed non-root UID (`65532:65532`).
+- **Unlike the systemd install, which binds `127.0.0.1` at the OS level and can never
+  be reached over the network, publishing the container's port is entirely your
+  call.** The SMTP listener has no authentication -- anything that can reach it can
+  inject Matrix messages. `-p 127.0.0.1:2525:2525` above keeps the same loopback-only
+  guarantee; if you instead attach the container to a docker network so other
+  containers can reach it directly (`chimney-post:2525`, no published port at all),
+  make sure that network only contains senders you trust.
+
+Verify the image the same way as the release tarballs (cosign signature + SLSA
+provenance) -- see the "Container Image" section of each release's notes for the
+exact commands.
+
 ## Sending Mail from Local Tools (`mailx`, cron, apticron, ...)
 
 Most tools that "send mail" -- `mailx`, `cron`, `apticron`, `rkhunter`, `logwatch`, etc. -- do not speak SMTP. They shell out to the `/usr/sbin/sendmail` binary interface and expect a local MTA to be installed. Chimney Post is an SMTP server, not a `sendmail` provider, so you bridge the two with a tiny send-only MTA that accepts mail on the `sendmail` interface and relays it over SMTP to Chimney Post's localhost listener.
