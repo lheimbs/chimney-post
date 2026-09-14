@@ -392,7 +392,7 @@ jobs:
 
             ## Container Image
 
-            A multi-arch (amd64/arm64) chiseled-distroless image is published to GHCR:
+            A multi-arch (amd64/arm64) distroless image is published to GHCR:
 
             ```sh
             docker pull ghcr.io/lheimbs/chimney-post:${{ env.VERSION }}

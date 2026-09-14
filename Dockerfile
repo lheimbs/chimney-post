@@ -1,10 +1,18 @@
 # syntax=docker/dockerfile:1
 #
-# Chiseled-distroless image: chimney-post's binary has no dynamic dependencies
+# Distroless runtime: chimney-post's binary has no dynamic dependencies
 # beyond libc/libgcc (no OpenSSL -- rustls-tls; no libsqlite3 -- rusqlite
-# "bundled" statically links it). The runtime stage below is `FROM scratch`
-# plus only the glibc/CA-cert slices Canonical's `chisel` cuts from real
-# Ubuntu 24.04 packages -- no shell, no package manager, nothing else.
+# "bundled" statically links it), and reqwest's rustls-tls-native-roots
+# feature reads /etc/ssl/certs/ca-certificates.crt at runtime when connecting
+# to the configured Matrix homeserver. gcr.io/distroless/cc-debian12 ships
+# exactly that (glibc, libgcc, CA certs) and nothing else -- no shell, no
+# package manager -- and its `:nonroot` tag already runs as a fixed
+# non-root UID (65532), so it needs no extra OS layer of our own.
+#
+# Both stages are Debian bookworm-based (rust:1.93-bookworm here,
+# distroless/cc-debian12 below), so the builder's glibc floor (2.36) matches
+# what the runtime image ships -- no cross-distro ABI mismatch to worry
+# about.
 #
 # Built natively per architecture (see .github/workflows/release.yml and
 # ci.yml) rather than cross-compiled, so no TARGETARCH/--target plumbing is
@@ -16,34 +24,14 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked
-
-# Slices matched against `ldd target/release/chimney-post`:
-#   libc6_libs      -> ld-linux*.so, libc.so.*, libm.so.*
-#   libgcc-s1_libs  -> libgcc_s.so.*
-#   ca-certificates_data -> /etc/ssl/certs/ca-certificates.crt, read at
-#     runtime by reqwest's rustls-tls-native-roots feature when connecting to
-#     the configured Matrix homeserver
-#   base-files_base -> minimal /etc, /tmp, ownership base the other slices and
-#     the runtime directories below build on
-FROM ubuntu:24.04 AS chisel
-ARG CHISEL_VERSION=v1.5.0
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
-RUN ARCH=$(dpkg --print-architecture) && \
-    curl -fsSL "https://github.com/canonical/chisel/releases/download/${CHISEL_VERSION}/chisel_${CHISEL_VERSION}_linux_${ARCH}.tar.gz" \
-      | tar -xz -C /usr/local/bin chisel
-RUN mkdir -p /rootfs && chisel cut --release ubuntu-24.04 --root /rootfs \
-      libc6_libs \
-      libgcc-s1_libs \
-      ca-certificates_data \
-      base-files_base
 # The service's persistent state (SQLite outbox + Matrix E2EE store) and its
-# config directory, pre-created and owned by the non-root UID the final stage
-# runs as -- `FROM scratch` has no shell to mkdir/chown at runtime.
-RUN mkdir -p /rootfs/etc/chimney-post /rootfs/var/lib/chimney-post && \
-    chown -R 65532:65532 /rootfs/etc/chimney-post /rootfs/var/lib/chimney-post
+# config directory, pre-created here and owned by the non-root UID the final
+# stage runs as -- distroless has no shell to mkdir/chown at runtime.
+RUN mkdir -p /rootfs/etc/chimney-post /rootfs/var/lib/chimney-post
 
-FROM scratch
-COPY --from=chisel /rootfs /
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=builder --chown=65532:65532 /rootfs/etc/chimney-post /etc/chimney-post
+COPY --from=builder --chown=65532:65532 /rootfs/var/lib/chimney-post /var/lib/chimney-post
 COPY --from=builder /build/target/release/chimney-post /usr/local/bin/chimney-post
 
 USER 65532:65532

@@ -375,9 +375,9 @@ docker run -d --name chimney-post \
 - `/var/lib/chimney-post` holds the SQLite outbox and the Matrix E2EE key store and
   must be a persistent volume; without it, mail queued between restarts and the
   encryption identity are both lost.
-- The image is `FROM scratch` (chiseled from Ubuntu 24.04 packages with
-  [`chisel`](https://github.com/canonical/chisel), see `Dockerfile`) -- no shell, no
-  package manager, runs as a fixed non-root UID (`65532:65532`).
+- The image is built `FROM` [`gcr.io/distroless/cc-debian12:nonroot`](https://github.com/GoogleContainerTools/distroless)
+  (see `Dockerfile`) -- no shell, no package manager, runs as a fixed non-root UID
+  (`65532:65532`).
 - **Unlike the systemd install, which binds `127.0.0.1` at the OS level and can never
   be reached over the network, publishing the container's port is entirely your
   call.** The SMTP listener has no authentication -- anything that can reach it can

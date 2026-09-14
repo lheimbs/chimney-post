@@ -66,7 +66,7 @@ jobs:
       # shellcheck ships preinstalled on the ubuntu-latest runner image.
       - run: shellcheck install.sh
 
-  # Builds the chiseled-distroless image from *this* checkout (unlike the
+  # Builds the distroless image from *this* checkout (unlike the
   # release.yml docker-build-push job, which builds the same Dockerfile
   # against a tagged release) and proves the packaging promises actually
   # hold: runs as the declared non-root UID, has no shell at all, and the
