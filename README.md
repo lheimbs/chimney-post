@@ -25,7 +25,7 @@
 
 Chimney Post sits on your local machine, accepts emails over SMTP, and delivers them as end-to-end encrypted messages to a Matrix room. It is designed for forwarding automated notifications on your server - be it nextcloud, rkhunter for rootkit hunting or apticron for automated upgrades - into one encrypted Matrix chat.
 
-The SMTP server binds exclusively to `127.0.0.1`, so it never accepts connections from the network. Matrix messages are encrypted by default using the `matrix-sdk` E2EE implementation, and the encryption store is persisted locally in SQLite so device keys survive restarts.
+The SMTP server binds to `127.0.0.1` by default, so it accepts no connections from the network. (The one exception is running it [as a container](#running-with-docker), where it must bind `0.0.0.0` *inside* the container and the container boundary limits reachability instead.) Matrix messages are encrypted by default using the `matrix-sdk` E2EE implementation, and the encryption store is persisted locally in SQLite so device keys survive restarts.
 
 This is essentially a super narrow version of [mailrise](https://github.com/YoRyan/mailrise) but intended for a single server and its services and only forwarding to matrix.
 
@@ -356,7 +356,17 @@ Environment=MATRIX_PASSWORD=your-secret
 
 ## Running with Docker
 
-A multi-arch (amd64/arm64) image is published to GHCR:
+A multi-arch (amd64/arm64) image is published to GHCR.
+
+**Set `bind = "0.0.0.0:2525"` in the config you mount.** This is the one setting
+that must differ from the default `config.toml`: inside a container, `127.0.0.1`
+is the *container's own* loopback, which neither a published port nor another
+container can ever reach. Leaving the default produces a confusing failure rather
+than a clean one -- the connection is accepted by Docker's port forwarder and then
+closed with no data, so senders report "connection reset" or "server does not
+speak SMTP", and the image has no shell to debug from. The container boundary, not
+the bind address, is what limits reachability here; the `-p` flag below is what
+keeps it on loopback.
 
 ```bash
 docker run -d --name chimney-post \
@@ -372,6 +382,13 @@ docker run -d --name chimney-post \
   you mount it somewhere else. Secrets referenced as `${MATRIX_PASSWORD}` /
   `${MATRIX_ACCESS_TOKEN}` in the config come from `-e`/`--env-file`, same as the
   systemd unit -- never bake them into the image or the config file itself.
+- The mounted config must be **readable by uid 65532**, the non-root user the
+  container runs as. `0644` is fine here and is not the same compromise as it would
+  be for the systemd install: the config holds only `${MATRIX_PASSWORD}`-style
+  placeholders, never the secret itself. (A `0600` root-owned file, as the systemd
+  section instructs, is unreadable inside the container -- there is no
+  `LoadCredential=` equivalent for a bind mount, and the container exits with a
+  single "Permission denied" line.)
 - `/var/lib/chimney-post` holds the SQLite outbox and the Matrix E2EE key store and
   must be a persistent volume; without it, mail queued between restarts and the
   encryption identity are both lost.
