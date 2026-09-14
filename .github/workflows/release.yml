@@ -130,6 +130,110 @@ jobs:
           path: chimney-post-${{ env.VERSION }}-${{ matrix.target }}.tar.gz
           retention-days: 7
 
+  # Native per-arch builds, same reasoning and same two runners as `build`
+  # above -- avoids QEMU emulation for arm64. Pushed by digest under an
+  # arch-suffixed tag; docker-manifest below combines the two into the
+  # multi-arch tag users actually pull.
+  docker-build-push:
+    needs: ci
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # provenance: false -- docker-sign-attest generates SLSA provenance for
+      # the finished multi-arch manifest instead, so buildx's own per-arch
+      # provenance attachment would just be redundant (and would attach to
+      # the wrong subject: the arch-suffixed tag, not the one users pull).
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: true
+          provenance: false
+          tags: ghcr.io/${{ github.repository }}:${{ env.VERSION }}-${{ matrix.arch }}
+
+  # Combines the two arch-suffixed images pushed above into the single
+  # multi-arch manifest under $VERSION and latest that users actually pull.
+  docker-manifest:
+    needs: docker-build-push
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.manifest.outputs.digest }}
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create and push multi-arch manifest
+        id: manifest
+        run: |
+          set -eo pipefail
+          docker buildx imagetools create \
+            -t "ghcr.io/${{ github.repository }}:${{ env.VERSION }}" \
+            -t "ghcr.io/${{ github.repository }}:latest" \
+            "ghcr.io/${{ github.repository }}:${{ env.VERSION }}-amd64" \
+            "ghcr.io/${{ github.repository }}:${{ env.VERSION }}-arm64"
+          digest=$(docker buildx imagetools inspect "ghcr.io/${{ github.repository }}:${{ env.VERSION }}" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+  # Same trust chain the tarballs get in sign-attest below, applied to the
+  # image: keyless cosign signature over the multi-arch manifest digest (not
+  # a tag, so the signature can't silently start covering different bytes if
+  # the tag is ever repointed) plus SLSA build provenance attached to the
+  # registry.
+  docker-sign-attest:
+    needs: docker-manifest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4
+      - name: Sign the image with cosign (keyless)
+        run: cosign sign --yes "ghcr.io/${{ github.repository }}@${{ needs.docker-manifest.outputs.digest }}"
+      # Same rationale as the tarball verification step in sign-attest below:
+      # runs the exact command the README/release notes hand to users.
+      - name: Verify the signature the way users will
+        run: |
+          cosign verify "ghcr.io/${{ github.repository }}@${{ needs.docker-manifest.outputs.digest }}" \
+            --certificate-identity "https://github.com/${{ github.workflow_ref }}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-github-workflow-repository "${{ github.repository }}"
+      - name: Generate SLSA build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ needs.docker-manifest.outputs.digest }}
+          push-to-registry: true
+
   sign-attest:
     needs: build
     runs-on: ubuntu-24.04
@@ -195,7 +299,11 @@ jobs:
           retention-days: 7
 
   release:
-    needs: sign-attest
+    # Both needed so the GitHub Release (which documents both the tarballs
+    # and the container image) never goes live before either is actually
+    # published and signed -- a partially-referenced release is worse than a
+    # slow one.
+    needs: [sign-attest, docker-sign-attest]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -278,6 +386,28 @@ jobs:
 
             ```sh
             gh attestation verify chimney-post-${{ env.VERSION }}-<target>.tar.gz \
+              --repo lheimbs/chimney-post \
+              --signer-workflow lheimbs/chimney-post/.github/workflows/release.yml
+            ```
+
+            ## Container Image
+
+            A multi-arch (amd64/arm64) chiseled-distroless image is published to GHCR:
+
+            ```sh
+            docker pull ghcr.io/lheimbs/chimney-post:${{ env.VERSION }}
+            ```
+
+            It carries the same cosign keyless signature and SLSA build provenance as the
+            tarballs above, under the same GitHub Actions OIDC identity:
+
+            ```sh
+            cosign verify ghcr.io/lheimbs/chimney-post:${{ env.VERSION }} \
+              --certificate-identity "https://github.com/lheimbs/chimney-post/.github/workflows/release.yml@refs/tags/${{ env.VERSION }}" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --certificate-github-workflow-repository "lheimbs/chimney-post"
+
+            gh attestation verify oci://ghcr.io/lheimbs/chimney-post:${{ env.VERSION }} \
               --repo lheimbs/chimney-post \
               --signer-workflow lheimbs/chimney-post/.github/workflows/release.yml
             ```
