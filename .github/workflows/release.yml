@@ -130,6 +130,184 @@ jobs:
           path: chimney-post-${{ env.VERSION }}-${{ matrix.target }}.tar.gz
           retention-days: 7
 
+  # Native per-arch builds, same reasoning and same two runners as `build`
+  # above -- avoids QEMU emulation for arm64.
+  #
+  # Pushed by digest with no tag of any kind: a tag here would be a publicly
+  # pullable, permanently unsigned artifact (only the finished index digest
+  # gets signed below), and on a partial failure -- `fail-fast: false` means
+  # one arch can fail alone -- it would leave a dangling half-release in the
+  # registry. The digests travel to docker-sign-attest as artifacts instead.
+  docker-build-push:
+    needs: ci
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # provenance: false -- docker-sign-attest generates SLSA provenance for
+      # the finished multi-arch index instead, so buildx's own per-arch
+      # provenance attachment would just be redundant (and would attach to
+      # the wrong subject: a per-arch manifest, not the index users pull).
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          provenance: false
+          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+      - name: Export digest
+        run: |
+          set -eo pipefail
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "::error::unexpected digest format '$digest'" >&2; exit 1 ;;
+          esac
+          touch "/tmp/digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: docker-digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # Assembles the per-arch digests into the multi-arch index, then applies the
+  # same trust chain the tarballs get in sign-attest below: a keyless cosign
+  # signature over the index digest (not a tag, so the signature can't
+  # silently start covering different bytes if a tag is later repointed) plus
+  # SLSA build provenance attached to the registry.
+  #
+  # `latest` is created only *after* signing succeeds. Otherwise a cosign
+  # failure (Fulcio/Rekor outage, OIDC hiccup) would leave `latest` already
+  # serving an unsigned image to every `docker pull`, failing the very
+  # verification command the release notes hand users. $VERSION has to exist
+  # before signing -- cosign signs an image that is already in the registry --
+  # but it is an immutable, not-yet-advertised tag, and no GitHub Release
+  # pointing at it is published unless this job succeeds.
+  docker-sign-attest:
+    needs: docker-build-push
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: /tmp/digests
+          pattern: docker-digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4
+      - name: Create the multi-arch index
+        id: manifest
+        working-directory: /tmp/digests
+        run: |
+          set -eo pipefail
+          # Both arches must be present: `fail-fast: false` lets one build
+          # fail on its own, and a silently single-arch "multi-arch" release
+          # is worse than a failed one.
+          #
+          # The guard counts the *same glob* the refs are built from, rather
+          # than `find -type f`: the two agree only as long as
+          # `merge-multiple: true` flattens the digests into this directory,
+          # and if that ever stops being true `find` would still count 2
+          # while `*` expanded to directory names, yielding a nonsense ref
+          # like `...@sha256:docker-digest-amd64`.
+          set -- *
+          if [ "$#" -ne 2 ]; then
+            echo "::error::expected 2 per-arch digests, found $#" >&2
+            exit 1
+          fi
+          for d in "$@"; do
+            if [ ! -f "$d" ]; then
+              echo "::error::'$d' is not a digest file -- unexpected artifact layout" >&2
+              exit 1
+            fi
+          done
+          # shellcheck disable=SC2046 # deliberate word splitting: one ref per digest file
+          docker buildx imagetools create \
+            -t "ghcr.io/${{ github.repository }}:${{ env.VERSION }}" \
+            $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' "$@")
+          digest=$(docker buildx imagetools inspect "ghcr.io/${{ github.repository }}:${{ env.VERSION }}" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Sign the image with cosign (keyless)
+        run: cosign sign --yes "ghcr.io/${{ github.repository }}@${{ steps.manifest.outputs.digest }}"
+      # Same rationale as the tarball verification step in sign-attest below:
+      # runs the exact command the README/release notes hand to users.
+      - name: Verify the signature the way users will
+        run: |
+          cosign verify "ghcr.io/${{ github.repository }}@${{ steps.manifest.outputs.digest }}" \
+            --certificate-identity "https://github.com/${{ github.workflow_ref }}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-github-workflow-repository "${{ github.repository }}"
+      - name: Generate SLSA build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+      # Only now, with the digest signed and attested, does the tag most
+      # people pull start pointing at it.
+      #
+      # `latest` has to mean "newest release", not "most recently pushed
+      # tag". A patch cut from an older line -- v1.2.4 released after v2.0.0
+      # already shipped -- would otherwise move `latest` *backwards* and
+      # silently downgrade everyone who pulls it, which is exactly what the
+      # README's `docker run` example does. The tag being released is already
+      # pushed by the time this runs, so it takes part in the comparison:
+      # promote only when it sorts highest. The immutable :VERSION tag is
+      # published either way, so a backport release is still fully usable.
+      - name: Promote to latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eo pipefail
+          # `|| true`: grep exits 1 when nothing matches, which under
+          # `pipefail` would abort here with no explanation. The tag that
+          # triggered this run always matches, so an empty result means the
+          # API call itself went wrong -- report that instead.
+          newest=$(gh api --paginate "repos/${{ github.repository }}/tags" --jq '.[].name' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V \
+            | tail -n1) || true
+          if [ -z "$newest" ]; then
+            echo "::error::could not enumerate release tags" >&2
+            exit 1
+          fi
+          if [ "$newest" != "${{ env.VERSION }}" ]; then
+            echo "::notice::${{ env.VERSION }} is not the newest release ($newest) -- leaving :latest pointing at $newest"
+            exit 0
+          fi
+          docker buildx imagetools create \
+            -t "ghcr.io/${{ github.repository }}:latest" \
+            "ghcr.io/${{ github.repository }}@${{ steps.manifest.outputs.digest }}"
+
   sign-attest:
     needs: build
     runs-on: ubuntu-24.04
@@ -195,7 +373,11 @@ jobs:
           retention-days: 7
 
   release:
-    needs: sign-attest
+    # Both needed so the GitHub Release (which documents both the tarballs
+    # and the container image) never goes live before either is actually
+    # published and signed -- a partially-referenced release is worse than a
+    # slow one.
+    needs: [sign-attest, docker-sign-attest]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -278,6 +460,28 @@ jobs:
 
             ```sh
             gh attestation verify chimney-post-${{ env.VERSION }}-<target>.tar.gz \
+              --repo lheimbs/chimney-post \
+              --signer-workflow lheimbs/chimney-post/.github/workflows/release.yml
+            ```
+
+            ## Container Image
+
+            A multi-arch (amd64/arm64) distroless image is published to GHCR:
+
+            ```sh
+            docker pull ghcr.io/lheimbs/chimney-post:${{ env.VERSION }}
+            ```
+
+            It carries the same cosign keyless signature and SLSA build provenance as the
+            tarballs above, under the same GitHub Actions OIDC identity:
+
+            ```sh
+            cosign verify ghcr.io/lheimbs/chimney-post:${{ env.VERSION }} \
+              --certificate-identity "https://github.com/lheimbs/chimney-post/.github/workflows/release.yml@refs/tags/${{ env.VERSION }}" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --certificate-github-workflow-repository "lheimbs/chimney-post"
+
+            gh attestation verify oci://ghcr.io/lheimbs/chimney-post:${{ env.VERSION }} \
               --repo lheimbs/chimney-post \
               --signer-workflow lheimbs/chimney-post/.github/workflows/release.yml
             ```

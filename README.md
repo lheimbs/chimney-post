@@ -25,13 +25,13 @@
 
 Chimney Post sits on your local machine, accepts emails over SMTP, and delivers them as end-to-end encrypted messages to a Matrix room. It is designed for forwarding automated notifications on your server - be it nextcloud, rkhunter for rootkit hunting or apticron for automated upgrades - into one encrypted Matrix chat.
 
-The SMTP server binds exclusively to `127.0.0.1`, so it never accepts connections from the network. Matrix messages are encrypted by default using the `matrix-sdk` E2EE implementation, and the encryption store is persisted locally in SQLite so device keys survive restarts.
+The SMTP server binds to `127.0.0.1` by default, so it accepts no connections from the network. (The one exception is running it [as a container](#running-with-docker), where it must bind `0.0.0.0` *inside* the container and the container boundary limits reachability instead.) Matrix messages are encrypted by default using the `matrix-sdk` E2EE implementation, and the encryption store is persisted locally in SQLite so device keys survive restarts.
 
 This is essentially a super narrow version of [mailrise](https://github.com/YoRyan/mailrise) but intended for a single server and its services and only forwarding to matrix.
 
 ## Features
 
-- **Local SMTP server** -- Listens on localhost only; never exposed to the network.
+- **Local SMTP server** -- Listens on localhost by default, so it is never exposed to the network. (Running it [as a container](#running-with-docker) is the exception: it binds `0.0.0.0` inside the container, and the network it is attached to plus the port you publish decide what can reach it.)
 - **End-to-end encrypted Matrix delivery** -- All messages are sent through E2EE. Optionally enforce that the target room is encrypted before sending.
 - **Password or access-token authentication** -- Connect to any Matrix homeserver with either method.
 - **Configurable message templates** -- Format forwarded emails with MiniJinja templates (subject, body, sender, recipient are all available as variables).
@@ -353,6 +353,86 @@ sudo systemctl edit chimney-post
 [Service]
 Environment=MATRIX_PASSWORD=your-secret
 ```
+
+## Running with Docker
+
+A multi-arch (amd64/arm64) image is published to GHCR.
+
+**Set `bind = "0.0.0.0:2525"` in the config you mount.** This is the one setting
+that must differ from the default `config.toml`: inside a container, `127.0.0.1`
+is the *container's own* loopback, which neither a published port nor another
+container can ever reach. Leaving the default produces a confusing failure rather
+than a clean one -- the connection is accepted by Docker's port forwarder and then
+closed with no data, so senders report "connection reset" or "server does not
+speak SMTP", and the image has no shell to debug from. What limits reachability
+here is not the bind address but *which network the container is on* and *what you
+publish* -- the two flags below.
+
+```bash
+# Once: a dedicated network. Not the default bridge -- see the note below.
+docker network create chimney-post
+
+docker run -d --name chimney-post \
+  --network chimney-post \
+  -v "$PWD/config.toml:/etc/chimney-post/config.toml:ro" \
+  -v chimney-post-data:/var/lib/chimney-post \
+  -e MATRIX_PASSWORD=your-secret \
+  -p 127.0.0.1:2525:2525 \
+  --stop-timeout 45 \
+  ghcr.io/lheimbs/chimney-post:latest
+```
+
+- `config.toml` is bind-mounted read-only; `CHIMNEY_CONFIG` already points at
+  `/etc/chimney-post/config.toml` in the image, so no extra env var is needed unless
+  you mount it somewhere else. Secrets referenced as `${MATRIX_PASSWORD}` /
+  `${MATRIX_ACCESS_TOKEN}` in the config come from `-e`/`--env-file`, same as the
+  systemd unit -- never bake them into the image or the config file itself.
+- The mounted config must be **readable by uid 65532**, the non-root user the
+  container runs as. `0644` is fine here and is not the same compromise as it would
+  be for the systemd install: the config holds only `${MATRIX_PASSWORD}`-style
+  placeholders, never the secret itself. (A `0600` root-owned file, as the systemd
+  section instructs, is unreadable inside the container -- there is no
+  `LoadCredential=` equivalent for a bind mount, and the container exits with a
+  single "Permission denied" line.)
+- `/var/lib/chimney-post` holds the SQLite outbox and the Matrix E2EE key store and
+  must be a persistent volume; without it, mail queued between restarts and the
+  encryption identity are both lost.
+- The image is built `FROM` [`gcr.io/distroless/cc-debian12:nonroot`](https://github.com/GoogleContainerTools/distroless)
+  (see `Dockerfile`) -- no shell, no package manager, runs as a fixed non-root UID
+  (`65532:65532`).
+- **The SMTP listener has no authentication -- anything that can reach it can inject
+  Matrix messages.** The systemd install binds `127.0.0.1` at the OS level and so
+  can never be reached over the network. A container binds `0.0.0.0`, so two
+  separate things decide who can reach it, and the command above sets both
+  deliberately:
+  - `-p 127.0.0.1:2525:2525` exposes it to **processes on the host** (apticron,
+    msmtp, rkhunter, cron jobs). Keep the `127.0.0.1:` prefix: a bare
+    `-p 2525:2525` publishes on every host interface, and because Docker's DNAT
+    rules are traversed before the filter `INPUT` chain, it silently bypasses
+    `ufw`/`firewalld` rules you may think are protecting the port.
+  - `--network chimney-post` exposes it to **other containers you attach to that
+    network**, which reach it as `chimney-post:2525` -- no published port involved.
+    Docker isolates bridge networks from one another, so containers on the default
+    bridge or on any other network cannot reach it at all. Treat attaching a
+    container to this network as granting it unauthenticated send access.
+
+  Do **not** rely on `-p 127.0.0.1:…` alone while leaving the container on the
+  default bridge (what `docker run` does with no `--network`): the published port
+  is loopback-only, but inter-container communication is enabled on the default
+  bridge, so every unrelated container on it can still reach the listener directly
+  at the container's IP. If nothing else needs to send mail, you can drop
+  `--network` and use a dedicated network with only this container in it; the
+  container always needs outbound access to reach your homeserver, so `--network
+  none` is never an option.
+- `--stop-timeout 45` matches the unit's `TimeoutStopSec=45`. On `SIGTERM` the
+  service spends up to 30s draining the outbox; Docker's default stop timeout is
+  **10s**, so without this flag `docker stop`/`docker restart` `SIGKILL`s the
+  process mid-drain. Nothing is lost permanently -- the outbox is on disk and is
+  re-read at startup -- but an in-flight Matrix delivery is cut.
+
+Verify the image the same way as the release tarballs (cosign signature + SLSA
+provenance) -- see the "Container Image" section of each release's notes for the
+exact commands.
 
 ## Sending Mail from Local Tools (`mailx`, cron, apticron, ...)
 

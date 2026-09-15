@@ -1,0 +1,11 @@
+.git
+target
+docs
+tests
+systemd
+.github
+.claude
+*.md
+config.toml
+config.example.toml
+chimney-post_banner.png

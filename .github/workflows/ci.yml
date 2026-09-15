@@ -66,6 +66,121 @@ jobs:
       # shellcheck ships preinstalled on the ubuntu-latest runner image.
       - run: shellcheck install.sh
 
+  # Builds the distroless image from *this* checkout (unlike the
+  # release.yml docker-build-push job, which builds the same Dockerfile
+  # against a tagged release) and proves the packaging promises actually
+  # hold: runs as the declared non-root UID, has no shell at all, and the
+  # SMTP server actually comes up and accepts connections.
+  docker-image:
+    # Skipped on tag pushes, same reasoning as the install-script jobs below:
+    # this pulls rust:1.93-bookworm anonymously from Docker Hub on shared
+    # GitHub runner IPs, so leaving it on the release path would let a Docker
+    # Hub rate limit block publishing a release. Nothing is lost there --
+    # release.yml's docker-build-push builds this same Dockerfile from the
+    # same commit.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          load: true
+          tags: chimney-post:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Runs as the declared non-root UID
+        run: |
+          user="$(docker inspect --format '{{.Config.User}}' chimney-post:ci)"
+          if [ "$user" != "65532:65532" ]; then
+            echo "::error::expected image user 65532:65532, got '$user'" >&2
+            exit 1
+          fi
+      # Control for the smoke test below: if the image ever grew a shell
+      # (e.g. a base image swap), the SMTP check would still pass for reasons
+      # that have nothing to do with the image actually being distroless.
+      - name: Control -- image has no shell
+        run: |
+          if docker run --rm --entrypoint sh chimney-post:ci -c true; then
+            echo "::error::image unexpectedly has a working shell -- not distroless" >&2
+            exit 1
+          fi
+      - name: Config load failure surfaces correctly
+        run: |
+          out=$(docker run --rm -e CHIMNEY_CONFIG=/nonexistent/chimney-post.toml chimney-post:ci 2>&1) && rc=0 || rc=$?
+          echo "$out"
+          if [ "${rc:-0}" -ne 1 ]; then
+            echo "::error::expected exit 1 from config load failure, got ${rc:-0}" >&2
+            exit 1
+          fi
+          case "$out" in
+            *"/nonexistent/chimney-post.toml"*) ;;
+            *) echo "::error::binary did not reach its config loader" >&2; exit 1 ;;
+          esac
+      # A minimal but real config (bogus Matrix creds) -- the SMTP listener
+      # must come up regardless, per the "resilient startup" design: the
+      # Matrix connection is backgrounded and retried, never gates accepting
+      # mail. This is the same property README documents and users rely on.
+      - name: Container starts and the SMTP port answers
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/config.toml" <<'EOF'
+          [smtp]
+          bind = "0.0.0.0:2525"
+          max_message_size = 10485760
+          timeout = 30
+          max_connections = 100
+          max_session_seconds = 300
+
+          [matrix]
+          homeserver = "https://matrix.example.org"
+          user_id = "@bot:example.org"
+          device_name = "chimney-post"
+          room_id = "!roomid:example.org"
+          store_path = "/var/lib/chimney-post/matrix-store"
+
+          [matrix.credentials]
+          password = "${MATRIX_PASSWORD}"
+          device_id = "chimney-post"
+
+          [logging]
+          level = "info"
+          format = "json"
+
+          [queue]
+          max_retries = 5
+          retry_backoff = 60
+          db_path = "/var/lib/chimney-post/queue.db"
+          max_len = 10000
+          EOF
+          docker run -d --name cp-ci -p 12525:2525 \
+            -v "$RUNNER_TEMP/config.toml:/etc/chimney-post/config.toml:ro" \
+            -e MATRIX_PASSWORD=dummy \
+            chimney-post:ci
+          # Read the actual SMTP greeting rather than just checking that a
+          # connection can be opened. `nc -z` completes docker-proxy's
+          # host-side handshake even when nothing usable is behind it -- a
+          # container bound to the *container's* own 127.0.0.1, or one that
+          # already crashed, both still accept and then close with zero
+          # bytes. Requiring a 220 banner is what actually proves the SMTP
+          # server is listening on an address reachable from outside.
+          ok=0
+          for _ in $(seq 1 10); do
+            if printf 'QUIT\r\n' | nc -w 3 127.0.0.1 12525 | grep -q '^220 '; then
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+          docker logs cp-ci
+          status="$(docker inspect -f '{{.State.Status}}' cp-ci)"
+          if [ "$ok" -ne 1 ] || [ "$status" != "running" ]; then
+            echo "::error::no SMTP 220 greeting, or container exited (status: $status)" >&2
+            exit 1
+          fi
+          docker rm -f cp-ci >/dev/null
+
   # Validates the unit file in *this* checkout. install.sh deliberately fetches
   # the unit from the release tag, so the install-script jobs below can only
   # ever exercise the already-published one -- this job is what covers changes
