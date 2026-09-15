@@ -232,15 +232,28 @@ jobs:
           # Both arches must be present: `fail-fast: false` lets one build
           # fail on its own, and a silently single-arch "multi-arch" release
           # is worse than a failed one.
-          count=$(find . -type f | wc -l)
-          if [ "$count" -ne 2 ]; then
-            echo "::error::expected 2 per-arch digests, found $count" >&2
+          #
+          # The guard counts the *same glob* the refs are built from, rather
+          # than `find -type f`: the two agree only as long as
+          # `merge-multiple: true` flattens the digests into this directory,
+          # and if that ever stops being true `find` would still count 2
+          # while `*` expanded to directory names, yielding a nonsense ref
+          # like `...@sha256:docker-digest-amd64`.
+          set -- *
+          if [ "$#" -ne 2 ]; then
+            echo "::error::expected 2 per-arch digests, found $#" >&2
             exit 1
           fi
+          for d in "$@"; do
+            if [ ! -f "$d" ]; then
+              echo "::error::'$d' is not a digest file -- unexpected artifact layout" >&2
+              exit 1
+            fi
+          done
           # shellcheck disable=SC2046 # deliberate word splitting: one ref per digest file
           docker buildx imagetools create \
             -t "ghcr.io/${{ github.repository }}:${{ env.VERSION }}" \
-            $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
+            $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' "$@")
           digest=$(docker buildx imagetools inspect "ghcr.io/${{ github.repository }}:${{ env.VERSION }}" --format '{{json .Manifest}}' | jq -r .digest)
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Sign the image with cosign (keyless)
