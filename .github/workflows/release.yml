@@ -35,6 +35,54 @@ jobs:
     permissions:
       contents: read
 
+  # Answers "is this tag the newest released version?" once, for everything
+  # downstream that has to decide whether it should become `latest`.
+  #
+  # Both the GHCR `:latest` tag and the GitHub Release's Latest marker have to
+  # mean "newest release", not "most recently pushed tag". A patch cut from an
+  # older line -- v1.2.4 released after v2.0.0 has already shipped -- would
+  # otherwise move both backwards: `docker pull ...:latest` would downgrade,
+  # and so would `curl ... | bash`, since install.sh resolves the version by
+  # following the /releases/latest redirect that the Latest marker controls.
+  #
+  # The tag being released is already pushed by the time this runs, so it
+  # takes part in the comparison: newest means it sorts highest among every
+  # vX.Y.Z tag in the repo. A backport release is still fully published,
+  # signed and attested under its own immutable tag -- it just doesn't claim
+  # to be the newest.
+  newest-release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      is_newest: ${{ steps.check.outputs.is_newest }}
+    steps:
+      - name: Is this the newest released version?
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eo pipefail
+          # `|| true`: grep exits 1 when nothing matches, which under
+          # `pipefail` would abort here with no explanation. The tag that
+          # triggered this run always matches, so an empty result means the
+          # API call itself went wrong -- report that instead.
+          newest=$(gh api --paginate "repos/${{ github.repository }}/tags" --jq '.[].name' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V \
+            | tail -n1) || true
+          if [ -z "$newest" ]; then
+            echo "::error::could not enumerate release tags" >&2
+            exit 1
+          fi
+          if [ "$newest" = "${{ env.VERSION }}" ]; then
+            echo "is_newest=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ env.VERSION }} is the newest release -- it will become :latest"
+          else
+            echo "is_newest=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ env.VERSION }} is not the newest release ($newest) -- leaving :latest pointing at $newest"
+          fi
+
   build:
     needs: ci
     runs-on: ${{ matrix.runner }}
@@ -204,7 +252,7 @@ jobs:
   # but it is an immutable, not-yet-advertised tag, and no GitHub Release
   # pointing at it is published unless this job succeeds.
   docker-sign-attest:
-    needs: docker-build-push
+    needs: [docker-build-push, newest-release]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -273,37 +321,11 @@ jobs:
           subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true
       # Only now, with the digest signed and attested, does the tag most
-      # people pull start pointing at it.
-      #
-      # `latest` has to mean "newest release", not "most recently pushed
-      # tag". A patch cut from an older line -- v1.2.4 released after v2.0.0
-      # already shipped -- would otherwise move `latest` *backwards* and
-      # silently downgrade everyone who pulls it, which is exactly what the
-      # README's `docker run` example does. The tag being released is already
-      # pushed by the time this runs, so it takes part in the comparison:
-      # promote only when it sorts highest. The immutable :VERSION tag is
-      # published either way, so a backport release is still fully usable.
+      # people pull start pointing at it -- and only if this release is
+      # actually the newest one. See the newest-release job for why.
       - name: Promote to latest
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        if: needs.newest-release.outputs.is_newest == 'true'
         run: |
-          set -eo pipefail
-          # `|| true`: grep exits 1 when nothing matches, which under
-          # `pipefail` would abort here with no explanation. The tag that
-          # triggered this run always matches, so an empty result means the
-          # API call itself went wrong -- report that instead.
-          newest=$(gh api --paginate "repos/${{ github.repository }}/tags" --jq '.[].name' \
-            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-            | sort -V \
-            | tail -n1) || true
-          if [ -z "$newest" ]; then
-            echo "::error::could not enumerate release tags" >&2
-            exit 1
-          fi
-          if [ "$newest" != "${{ env.VERSION }}" ]; then
-            echo "::notice::${{ env.VERSION }} is not the newest release ($newest) -- leaving :latest pointing at $newest"
-            exit 0
-          fi
           docker buildx imagetools create \
             -t "ghcr.io/${{ github.repository }}:latest" \
             "ghcr.io/${{ github.repository }}@${{ steps.manifest.outputs.digest }}"
@@ -373,11 +395,13 @@ jobs:
           retention-days: 7
 
   release:
-    # Both needed so the GitHub Release (which documents both the tarballs
-    # and the container image) never goes live before either is actually
-    # published and signed -- a partially-referenced release is worse than a
-    # slow one.
-    needs: [sign-attest, docker-sign-attest]
+    # sign-attest and docker-sign-attest so the GitHub Release (which
+    # documents both the tarballs and the container image) never goes live
+    # before either is actually published and signed -- a partially-referenced
+    # release is worse than a slow one. newest-release supplies make_latest
+    # below; if that lookup fails the release is blocked rather than
+    # mismarked, for the same reason.
+    needs: [sign-attest, docker-sign-attest, newest-release]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -406,7 +430,15 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           prerelease: false
-          make_latest: true
+          # Not a hardcoded `true`: that is the *force* value, which marks
+          # this release Latest no matter what version it is. install.sh
+          # resolves the version to install by following the
+          # /releases/latest redirect this marker controls, so forcing it on
+          # a backport release makes `curl ... | bash` install the older
+          # binary. `legacy` is not the fix either -- it hands the decision
+          # to GitHub's own heuristic. Decide it here, the same way the
+          # GHCR :latest tag is decided.
+          make_latest: ${{ needs.newest-release.outputs.is_newest }}
           files: |
             artifacts/*.tar.gz
             artifacts/SHA256SUMS
