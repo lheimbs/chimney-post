@@ -31,7 +31,7 @@ This is essentially a super narrow version of [mailrise](https://github.com/YoRy
 
 ## Features
 
-- **Local SMTP server** -- Listens on localhost only; never exposed to the network.
+- **Local SMTP server** -- Listens on localhost by default, so it is never exposed to the network. (Running it [as a container](#running-with-docker) is the exception: it binds `0.0.0.0` inside the container, and the network it is attached to plus the port you publish decide what can reach it.)
 - **End-to-end encrypted Matrix delivery** -- All messages are sent through E2EE. Optionally enforce that the target room is encrypted before sending.
 - **Password or access-token authentication** -- Connect to any Matrix homeserver with either method.
 - **Configurable message templates** -- Format forwarded emails with MiniJinja templates (subject, body, sender, recipient are all available as variables).
@@ -364,12 +364,16 @@ is the *container's own* loopback, which neither a published port nor another
 container can ever reach. Leaving the default produces a confusing failure rather
 than a clean one -- the connection is accepted by Docker's port forwarder and then
 closed with no data, so senders report "connection reset" or "server does not
-speak SMTP", and the image has no shell to debug from. The container boundary, not
-the bind address, is what limits reachability here; the `-p` flag below is what
-keeps it on loopback.
+speak SMTP", and the image has no shell to debug from. What limits reachability
+here is not the bind address but *which network the container is on* and *what you
+publish* -- the two flags below.
 
 ```bash
+# Once: a dedicated network. Not the default bridge -- see the note below.
+docker network create chimney-post
+
 docker run -d --name chimney-post \
+  --network chimney-post \
   -v "$PWD/config.toml:/etc/chimney-post/config.toml:ro" \
   -v chimney-post-data:/var/lib/chimney-post \
   -e MATRIX_PASSWORD=your-secret \
@@ -395,13 +399,30 @@ docker run -d --name chimney-post \
 - The image is built `FROM` [`gcr.io/distroless/cc-debian12:nonroot`](https://github.com/GoogleContainerTools/distroless)
   (see `Dockerfile`) -- no shell, no package manager, runs as a fixed non-root UID
   (`65532:65532`).
-- **Unlike the systemd install, which binds `127.0.0.1` at the OS level and can never
-  be reached over the network, publishing the container's port is entirely your
-  call.** The SMTP listener has no authentication -- anything that can reach it can
-  inject Matrix messages. `-p 127.0.0.1:2525:2525` above keeps the same loopback-only
-  guarantee; if you instead attach the container to a docker network so other
-  containers can reach it directly (`chimney-post:2525`, no published port at all),
-  make sure that network only contains senders you trust.
+- **The SMTP listener has no authentication -- anything that can reach it can inject
+  Matrix messages.** The systemd install binds `127.0.0.1` at the OS level and so
+  can never be reached over the network. A container binds `0.0.0.0`, so two
+  separate things decide who can reach it, and the command above sets both
+  deliberately:
+  - `-p 127.0.0.1:2525:2525` exposes it to **processes on the host** (apticron,
+    msmtp, rkhunter, cron jobs). Keep the `127.0.0.1:` prefix: a bare
+    `-p 2525:2525` publishes on every host interface, and because Docker's DNAT
+    rules are traversed before the filter `INPUT` chain, it silently bypasses
+    `ufw`/`firewalld` rules you may think are protecting the port.
+  - `--network chimney-post` exposes it to **other containers you attach to that
+    network**, which reach it as `chimney-post:2525` -- no published port involved.
+    Docker isolates bridge networks from one another, so containers on the default
+    bridge or on any other network cannot reach it at all. Treat attaching a
+    container to this network as granting it unauthenticated send access.
+
+  Do **not** rely on `-p 127.0.0.1:…` alone while leaving the container on the
+  default bridge (what `docker run` does with no `--network`): the published port
+  is loopback-only, but inter-container communication is enabled on the default
+  bridge, so every unrelated container on it can still reach the listener directly
+  at the container's IP. If nothing else needs to send mail, you can drop
+  `--network` and use a dedicated network with only this container in it; the
+  container always needs outbound access to reach your homeserver, so `--network
+  none` is never an option.
 
 Verify the image the same way as the release tarballs (cosign signature + SLSA
 provenance) -- see the "Container Image" section of each release's notes for the
