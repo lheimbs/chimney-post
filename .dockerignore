@@ -7,5 +7,9 @@ systemd
 .claude
 *.md
 config.toml
-config.example.toml
+# config.example.toml is deliberately *not* excluded: src/config.rs
+# include_str!s it from its test module, and an entry here would defeat an
+# explicit `COPY config.example.toml ./` with a bare "not found" that gives no
+# hint the file was filtered. The Dockerfile's COPY list is explicit, so
+# nothing enters the image because of this.
 chimney-post_banner.png
