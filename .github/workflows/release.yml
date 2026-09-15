@@ -274,8 +274,36 @@ jobs:
           push-to-registry: true
       # Only now, with the digest signed and attested, does the tag most
       # people pull start pointing at it.
+      #
+      # `latest` has to mean "newest release", not "most recently pushed
+      # tag". A patch cut from an older line -- v1.2.4 released after v2.0.0
+      # already shipped -- would otherwise move `latest` *backwards* and
+      # silently downgrade everyone who pulls it, which is exactly what the
+      # README's `docker run` example does. The tag being released is already
+      # pushed by the time this runs, so it takes part in the comparison:
+      # promote only when it sorts highest. The immutable :VERSION tag is
+      # published either way, so a backport release is still fully usable.
       - name: Promote to latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -eo pipefail
+          # `|| true`: grep exits 1 when nothing matches, which under
+          # `pipefail` would abort here with no explanation. The tag that
+          # triggered this run always matches, so an empty result means the
+          # API call itself went wrong -- report that instead.
+          newest=$(gh api --paginate "repos/${{ github.repository }}/tags" --jq '.[].name' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V \
+            | tail -n1) || true
+          if [ -z "$newest" ]; then
+            echo "::error::could not enumerate release tags" >&2
+            exit 1
+          fi
+          if [ "$newest" != "${{ env.VERSION }}" ]; then
+            echo "::notice::${{ env.VERSION }} is not the newest release ($newest) -- leaving :latest pointing at $newest"
+            exit 0
+          fi
           docker buildx imagetools create \
             -t "ghcr.io/${{ github.repository }}:latest" \
             "ghcr.io/${{ github.repository }}@${{ steps.manifest.outputs.digest }}"
