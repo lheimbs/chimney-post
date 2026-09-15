@@ -378,6 +378,7 @@ docker run -d --name chimney-post \
   -v chimney-post-data:/var/lib/chimney-post \
   -e MATRIX_PASSWORD=your-secret \
   -p 127.0.0.1:2525:2525 \
+  --stop-timeout 45 \
   ghcr.io/lheimbs/chimney-post:latest
 ```
 
@@ -423,6 +424,11 @@ docker run -d --name chimney-post \
   `--network` and use a dedicated network with only this container in it; the
   container always needs outbound access to reach your homeserver, so `--network
   none` is never an option.
+- `--stop-timeout 45` matches the unit's `TimeoutStopSec=45`. On `SIGTERM` the
+  service spends up to 30s draining the outbox; Docker's default stop timeout is
+  **10s**, so without this flag `docker stop`/`docker restart` `SIGKILL`s the
+  process mid-drain. Nothing is lost permanently -- the outbox is on disk and is
+  re-read at startup -- but an in-flight Matrix delivery is cut.
 
 Verify the image the same way as the release tarballs (cosign signature + SLSA
 provenance) -- see the "Container Image" section of each release's notes for the
