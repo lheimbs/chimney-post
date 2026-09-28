@@ -33,6 +33,12 @@ minijinja = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
 sd-notify = "0.4"
 validator = "0.20"
+# MIME parsing for the SMTP DATA block: multipart traversal, Content-Transfer-
+# Encoding decoding (quoted-printable / base64) and RFC 2047 encoded-words in
+# headers. Pure Rust, so it adds no C toolchain requirement to the release and
+# container builds; its only notable transitive dependency is encoding_rs (via
+# `charset`) for non-UTF-8 part charsets.
+mailparse = "0.17"
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "io-util", "net", "time"] }
