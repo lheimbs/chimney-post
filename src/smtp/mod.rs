@@ -1,3 +1,4 @@
+mod mime;
 mod parser;
 mod server;
 
