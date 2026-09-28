@@ -617,3 +617,75 @@ async fn message_survives_crash_and_is_redelivered_on_restart() {
         delivered[0]
     );
 }
+
+/// End-to-end proof that a real mail client's message reaches the outbox as
+/// readable text. Before MIME parsing, everything after the first blank line
+/// went into the queue verbatim, so a Nextcloud notification arrived in Matrix
+/// as MIME boundaries, `=3D` escapes and a screenful of HTML.
+#[tokio::test]
+async fn smtp_queues_a_multipart_message_as_readable_text() {
+    let (bind, store, server_handle) = start_test_server(test_config("127.0.0.1:0", 10240)).await;
+
+    let stream = TcpStream::connect(&bind).await.unwrap();
+    let (read_half, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(read_half);
+    read_response(&mut reader).await;
+
+    writer.write_all(b"EHLO test\r\n").await.unwrap();
+    read_response(&mut reader).await;
+    writer
+        .write_all(b"MAIL FROM:<nextcloud@mail.example.org>\r\n")
+        .await
+        .unwrap();
+    read_response(&mut reader).await;
+    writer
+        .write_all(b"RCPT TO:<alerts@chimney>\r\n")
+        .await
+        .unwrap();
+    read_response(&mut reader).await;
+    writer.write_all(b"DATA\r\n").await.unwrap();
+    read_response(&mut reader).await;
+
+    let message = concat!(
+        "Subject: Email setting test\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: multipart/alternative; boundary=ZkhUrnZN\r\n",
+        "\r\n",
+        "--ZkhUrnZN\r\n",
+        "Content-Type: text/plain; charset=utf-8\r\n",
+        "Content-Transfer-Encoding: quoted-printable\r\n",
+        "\r\n",
+        "If you received this email, the email configuration =\r\n",
+        "seems to be correct.\r\n",
+        "--ZkhUrnZN\r\n",
+        "Content-Type: text/html; charset=utf-8\r\n",
+        "Content-Transfer-Encoding: quoted-printable\r\n",
+        "\r\n",
+        "<html><body><p style=3D\"color:#fff\">markup</p></body></html>\r\n",
+        "--ZkhUrnZN--\r\n",
+        ".\r\n",
+    );
+    writer.write_all(message.as_bytes()).await.unwrap();
+    let resp = read_response(&mut reader).await;
+    assert!(resp.starts_with("250"));
+
+    writer.write_all(b"QUIT\r\n").await.unwrap();
+    read_response(&mut reader).await;
+
+    let stored = store
+        .claim_next_ready(now_secs())
+        .await
+        .unwrap()
+        .expect("message should be persisted in the queue");
+
+    assert_eq!(
+        stored.message.subject.as_deref(),
+        Some("Email setting test")
+    );
+    assert_eq!(
+        stored.message.body,
+        "If you received this email, the email configuration seems to be correct."
+    );
+
+    server_handle.abort();
+}
