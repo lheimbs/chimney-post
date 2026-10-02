@@ -111,11 +111,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      # Pinned to 1.93 to match ci.yml: Rust 1.94+ fails `cargo build` with a
+      # Matches ci.yml. The 1.93 pin that stood here was for the Rust 1.94+
       # query-depth overflow on matrix-sdk's huge `Client::sync()` future
-      # (matrix-org/matrix-rust-sdk#6254). Lift once this repo bumps matrix-sdk
-      # to 0.16.1+/0.17.0+, which fixed it.
-      - uses: dtolnay/rust-toolchain@841e5d09118f0311af26ce5ba303c1f15b358772 # 1.93
+      # (matrix-org/matrix-rust-sdk#6254); bumping matrix-sdk to 0.19 fixed it,
+      # so this now tracks the same toolchain the check job uses.
+      - uses: dtolnay/rust-toolchain@70dec6087f2cb6bab9fbac4da23160afbe848e91 # 1.99
         with:
           targets: ${{ matrix.target }}
       # Deliberately no build cache. This job's output is signed and carries
