@@ -1,5 +1,5 @@
 [smtp]
-# Bind address (must be local)
+# Bind address. Keep this on loopback; only the container image should use 0.0.0.0
 bind = "127.0.0.1:2525"
 # Maximum message size in bytes
 max_message_size = 10485760  # 10MB
