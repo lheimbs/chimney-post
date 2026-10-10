@@ -24,14 +24,17 @@ Copy the example config and set the Matrix and SMTP values.
 
 Checklist:
 
-- Use a localhost bind for SMTP.
+- Use a localhost bind for SMTP (`0.0.0.0` is only for the container image).
 - Use a room ID (not alias).
 - Use either password or access token, not both.
 - Set a writable store path for the E2EE store.
 
 ### 3) Ensure local-only SMTP binding
 
-The SMTP server must bind to 127.0.0.1. Any non-loopback bind should fail validation.
+Outside a container the SMTP server should bind to 127.0.0.1 (the default).
+The bind address is not restricted to loopback in code -- the container image
+has to bind `0.0.0.0` -- so check the `SMTP server listening` log line to
+confirm what you are actually exposing. An unparseable address fails validation.
 
 ## Unit Tests
 
@@ -41,7 +44,7 @@ Run the unit test suite:
 
 What this covers:
 
-- Config validation for loopback-only SMTP binding.
+- Config validation (e.g. rejecting an unparseable SMTP bind address).
 - Email parser logic (subject parsing, folded header handling).
 - Matrix formatter behavior for missing fields.
 
@@ -53,7 +56,8 @@ Run integration tests:
 
 What this covers:
 
-- Config rejects non-loopback SMTP bind (integration-level).
+- SMTP sessions over a real socket, including the multipart path, size limits
+  and rejection of an invalid bind address.
 
 ## Manual End-to-End Tests
 
@@ -146,14 +150,16 @@ Expected:
 
 ## Security and Safety Checks
 
-### 1) Local-only enforcement
+### 1) Local-only default
 
-Attempt to bind to a non-loopback address. This should fail at startup.
+Start with the shipped default config (no `bind` override).
 
 Expected:
 
-- Clear error message in logs.
-- Process exits without starting SMTP listener.
+- The `SMTP server listening` log line shows `127.0.0.1:2525`.
+- `ss -ltn` shows no listener on a non-loopback address.
+- Setting `bind` to an invalid address (e.g. `not-an-address`) exits at startup
+  with a clear config error.
 
 ### 2) Credential handling
 

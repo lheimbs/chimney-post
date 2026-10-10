@@ -12,8 +12,12 @@ single-server alternative to [mailrise](https://github.com/YoRyan/mailrise).
 
 Key properties that shape most design decisions:
 
-- The SMTP listener binds to `127.0.0.1` only — it must never accept
-  connections from the network.
+- The SMTP listener binds to `127.0.0.1` by default and is not exposed to
+  the network. The bind address is not enforced to be loopback in code: the
+  Docker image must bind `0.0.0.0` inside the container, so there the
+  container network and published port limit reachability instead (see
+  the README's Docker section). Never widen the default or the systemd
+  unit's bind.
 - Matrix delivery is E2EE via `matrix-sdk`, with the crypto store persisted
   to SQLite so device identity survives restarts.
 - Accepted mail is durably queued (SQLite outbox) *before* the SMTP `250 OK`
@@ -45,7 +49,7 @@ Module layout (`src/`):
 
 | Module | File(s) | Responsibility |
 |---|---|---|
-| `config` | `config.rs` | TOML config loading, env-var substitution, validation (e.g. rejecting non-loopback SMTP binds, invalid Matrix IDs). |
+| `config` | `config.rs` | TOML config loading, env-var substitution, validation (e.g. rejecting unparseable SMTP bind addresses, invalid Matrix IDs). |
 | `error` | `error.rs` | Single `ChimneyError` enum (`thiserror`) and the crate-wide `Result<T>` alias. |
 | `smtp` | `smtp/server.rs`, `smtp/parser.rs` | Async SMTP session handling and email parsing (headers, folded-header unfolding, body extraction). |
 | `matrix` | `matrix/client.rs`, `matrix/formatter.rs`, `matrix/routing.rs` | Matrix login/connect (password or access-token), MiniJinja message formatting, and recipient/sender-based room routing. |
@@ -83,8 +87,8 @@ from store on success, else reschedule with backoff or dead-letter after
 - **Async correctness.** This is a Tokio codebase — never block the runtime
   with synchronous I/O or `std::thread::sleep`; use `tokio::time::sleep`,
   `tokio::fs`, etc.
-- **Security invariants are non-negotiable:** SMTP must stay bound to
-  loopback only, Matrix messages must stay E2EE by default, credentials
+- **Security invariants are non-negotiable:** SMTP must default to
+  loopback (only the container image binds wider), Matrix messages must stay E2EE by default, credentials
   come from environment variables (never hardcoded or logged), and logs
   must not leak message bodies, passwords, or tokens.
 - **Doc comments on public APIs.** Use `///` with a `# Errors` section for
