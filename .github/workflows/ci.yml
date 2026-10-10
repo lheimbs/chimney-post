@@ -18,12 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # Pinned to 1.93: Rust 1.94+ clippy overflows the query depth limit while
-      # computing the layout of matrix-sdk's huge `Client::sync()` future
-      # ("queries overflow the depth limit!"). It's a regression in the
-      # dependency's generated code that we can't edit. Revisit when a newer
-      # matrix-sdk or clippy fixes it.
-      - uses: dtolnay/rust-toolchain@1.93
+      # The 1.93 pin this carried is gone: it existed because Rust 1.94+ clippy
+      # overflowed the query depth limit on matrix-sdk's huge `Client::sync()`
+      # future, which matrix-sdk 0.16.1+ fixed. Verified against 1.99.
+      - uses: dtolnay/rust-toolchain@1.99
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -46,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.96
       - uses: Swatinem/rust-cache@v2
       # Enforce the declared minimum supported Rust version.
       - run: cargo check --all-targets
@@ -73,7 +71,7 @@ jobs:
   # SMTP server actually comes up and accepts connections.
   docker-image:
     # Skipped on tag pushes, same reasoning as the install-script jobs below:
-    # this pulls rust:1.93-bookworm anonymously from Docker Hub on shared
+    # this pulls rust:1.99-bookworm anonymously from Docker Hub on shared
     # GitHub runner IPs, so leaving it on the release path would let a Docker
     # Hub rate limit block publishing a release. Nothing is lost there --
     # release.yml's docker-build-push builds this same Dockerfile from the

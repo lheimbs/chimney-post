@@ -12,7 +12,7 @@
   <a href="https://github.com/lheimbs/chimney-post/actions/workflows/ci.yml"><img src="https://github.com/lheimbs/chimney-post/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/lheimbs/chimney-post/releases"><img src="https://img.shields.io/github/v/release/lheimbs/chimney-post" alt="Latest Release"></a>
   <a href="https://github.com/lheimbs/chimney-post/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
-  <img src="https://img.shields.io/badge/rust-1.88%2B-orange" alt="Minimum Rust version: 1.88">
+  <img src="https://img.shields.io/badge/rust-1.96%2B-orange" alt="Minimum Rust version: 1.96">
 </p>
 
 ---
@@ -67,7 +67,7 @@ This is essentially a super narrow version of [mailrise](https://github.com/YoRy
 
 ### Prerequisites
 
-- Rust 1.88 or later (install via [rustup](https://rustup.rs/))
+- Rust 1.96 or later (install via [rustup](https://rustup.rs/) -- distro packages are generally older)
 - A Matrix account for the bot
 - A Matrix room where the bot should post (invite the bot user to the room)
 
@@ -211,11 +211,14 @@ All settings live in a single TOML file. See `config.example.toml` for a fully a
 | `routes`           | *(none)*         | Optional room-routing rules; see [Room routing](#room-routing). |
 
 TLS to `homeserver` is handled by [rustls](https://github.com/rustls/rustls),
-not OpenSSL. Both the bundled Mozilla root set and your OS's trust store are
-checked, so a homeserver with a certificate from a private/corporate CA that's
-trusted by the machine's OS will work. Two things rustls is stricter about
-than OpenSSL and won't accept from *either* store: TLS 1.0/1.1, and
-certificates that carry only a CN with no SAN.
+not OpenSSL. Certificates are verified against **your OS's trust store**, so a
+homeserver with a certificate from a private/corporate CA that the machine
+trusts will work. There is no bundled Mozilla root set to fall back on: a host
+whose system CA store is missing or empty cannot verify any homeserver. (The
+container image is fine -- `distroless/cc-debian12` ships
+`/etc/ssl/certs/ca-certificates.crt`.) Two things rustls is stricter about than
+OpenSSL and won't accept from the store either: TLS 1.0/1.1, and certificates
+that carry only a CN with no SAN.
 
 ### Room routing
 

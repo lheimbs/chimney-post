@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "Local-only SMTP server forwarding email to Matrix with E2EE"
-rust-version = "1.88"
+rust-version = "1.96"
 
 [dependencies]
 tokio = { version = "1.49.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time", "io-util"] }
@@ -13,24 +13,19 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.9.8"
 thiserror = "2.0.18"
-# default-features is off only to drop `native-tls`; the other three are
-# matrix-sdk's own defaults, re-listed verbatim. `rustls-tls` replaces OpenSSL
-# with a pure-Rust TLS stack, which removes the openssl-sys build-script
-# dependency on target-arch OpenSSL headers.
-matrix-sdk = { version = "0.16.0", default-features = false, features = [
+# These four are matrix-sdk's own defaults, re-listed verbatim so a change to
+# that set is a deliberate edit here rather than a silent one upstream.
+# `rustls-aws-lc-rs` (named `rustls-tls` before 0.19) keeps TLS off OpenSSL, so
+# there is no openssl-sys build script needing target-arch OpenSSL headers.
+matrix-sdk = { version = "0.19.1", default-features = false, features = [
     "e2e-encryption",
     "automatic-room-key-forwarding",
     "sqlite",
-    "rustls-tls",
+    "rustls-aws-lc-rs",
 ] }
-# Not used directly in source. Unions `rustls-tls-native-roots` into the
-# `reqwest` that matrix-sdk pulls in, so the OS trust store is searched
-# alongside the bundled webpki-roots -- otherwise a homeserver behind a
-# private/corporate CA fails to connect under rustls. See README.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
 url = "2.5.7"
 minijinja = "2"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 sd-notify = "0.4"
 validator = "0.20"
 # MIME parsing for the SMTP DATA block: multipart traversal, Content-Transfer-

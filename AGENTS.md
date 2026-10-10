@@ -70,10 +70,9 @@ from store on success, else reschedule with backoff or dead-letter after
   Actions step in `.github/workflows/`, or anything else. Look up its
   current latest version rather than guessing or relying on training data,
   and check it's actually compatible with this project (crate: matches
-  `edition = "2021"` and `rust-version = "1.88"` in `Cargo.toml`, and the
-  1.93 toolchain pinned in CI — see the comment in `ci.yml` about the
-  clippy/matrix-sdk regression on 1.94+; Action: matches the runner and
-  any adjacent pinned actions) before pinning a version.
+  `edition = "2021"` and `rust-version = "1.96"` in `Cargo.toml`, and the
+  1.99 toolchain CI runs; Action: matches the runner and any adjacent
+  pinned actions) before pinning a version.
 - **No `unwrap()`/`expect()` on paths reachable from production code.**
   Propagate errors through `Result<T, ChimneyError>` (`error.rs`). `unwrap`
   is fine in tests and in cases that are genuinely infallible (document why

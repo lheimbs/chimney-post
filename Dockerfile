@@ -1,15 +1,17 @@
 # syntax=docker/dockerfile:1
 #
 # Distroless runtime: chimney-post's binary has no dynamic dependencies
-# beyond libc/libgcc (no OpenSSL -- rustls-tls; no libsqlite3 -- rusqlite
-# "bundled" statically links it), and reqwest's rustls-tls-native-roots
-# feature reads /etc/ssl/certs/ca-certificates.crt at runtime when connecting
-# to the configured Matrix homeserver. gcr.io/distroless/cc-debian12 ships
+# beyond libc/libgcc (no OpenSSL -- rustls; no libsqlite3 -- rusqlite
+# "bundled" statically links it, and aws-lc-sys, which rustls pulls in as its
+# crypto provider, likewise builds and links statically), and reqwest's
+# rustls-platform-verifier reads /etc/ssl/certs/ca-certificates.crt at runtime
+# when connecting to the configured Matrix homeserver.
+# gcr.io/distroless/cc-debian12 ships
 # exactly that (glibc, libgcc, CA certs) and nothing else -- no shell, no
 # package manager -- and its `:nonroot` tag already runs as a fixed
 # non-root UID (65532), so it needs no extra OS layer of our own.
 #
-# Both stages are Debian bookworm-based (rust:1.93-bookworm here,
+# Both stages are Debian bookworm-based (rust:1.99-bookworm here,
 # distroless/cc-debian12 below), so the builder's glibc floor (2.36) matches
 # what the runtime image ships -- no cross-distro ABI mismatch to worry
 # about.
@@ -25,7 +27,7 @@
 # compromised binary with a perfectly valid signature. Both digests are
 # multi-arch indexes, so each native runner still resolves its own
 # architecture. Update them deliberately, the way Action pins are updated.
-FROM rust:1.93-bookworm@sha256:7c4ae649a84014c467d79319bbf17ce2632ae8b8be123ac2fb2ea5be46823f31 AS builder
+FROM rust:1.99-bookworm@sha256:59037199c44290f2befcdd58dcc540164763fc296950255aaefeef096a1866b0 AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
