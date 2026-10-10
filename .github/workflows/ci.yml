@@ -49,6 +49,32 @@ jobs:
       # Enforce the declared minimum supported Rust version.
       - run: cargo check --all-targets
 
+  # Release binaries are static musl builds so they run on hosts with an older
+  # glibc than the build runner (a glibc build from a 24.04 runner failed on
+  # Debian 12 with a loader error). Release builds are rare, so a musl-only
+  # breakage -- a dependency whose C build script doesn't cope with musl -- would
+  # otherwise only surface at tag time. x86_64 only here; release.yml builds
+  # and smoke-tests both architectures natively.
+  musl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Build and assert the binary is static
+        run: |
+          export CC_x86_64_unknown_linux_musl=musl-gcc
+          cargo build --release --locked --target x86_64-unknown-linux-musl
+          bin=target/x86_64-unknown-linux-musl/release/chimney-post
+          if ! ldd "$bin" 2>&1 | grep -qE 'statically linked|not a dynamic executable'; then
+            echo "::error::musl build is dynamically linked" >&2
+            ldd "$bin" >&2 || true
+            exit 1
+          fi
+
   audit:
     runs-on: ubuntu-latest
     steps:
