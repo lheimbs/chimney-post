@@ -76,8 +76,8 @@ case "$(uname -s)" in
 esac
 
 case "$(uname -m)" in
-  x86_64|amd64)   TARGET="x86_64-unknown-linux-gnu" ;;
-  aarch64|arm64)  TARGET="aarch64-unknown-linux-gnu" ;;
+  x86_64|amd64)   ARCH="x86_64" ;;
+  aarch64|arm64)  ARCH="aarch64" ;;
   *) err "unsupported architecture '$(uname -m)' -- build from source instead (see README)" ;;
 esac
 
@@ -97,6 +97,43 @@ if [ -z "$VERSION" ]; then
     *) err "could not resolve the latest release tag (got '$VERSION' from ${latest_url}) -- set CHIMNEY_VERSION to a release tag such as v0.1.0" ;;
   esac
 fi
+DL_BASE="https://github.com/${REPO}/releases/download/${VERSION}"
+
+# Newer releases ship statically linked musl binaries, which run on any Linux
+# regardless of its glibc. Older releases only have glibc builds, which need a
+# recent glibc and otherwise fail at service start with a loader error -- so
+# for those, check up front instead of installing a binary that can't run.
+# A ranged GET rather than HEAD: the asset URL redirects to a signed storage
+# URL that is only valid for the method it was issued for.
+TARGET="${ARCH}-unknown-linux-musl"
+probe_code=$(curl -sSL -r 0-0 -o /dev/null -w '%{http_code}' \
+  "$DL_BASE/chimney-post-${VERSION}-${TARGET}.tar.gz") \
+  || err "could not reach github.com to look up the ${VERSION} release assets"
+case "$probe_code" in
+  200|206) ;;
+  404)
+    TARGET="${ARCH}-unknown-linux-gnu"
+    # What the glibc builds of the older releases were linked against.
+    MIN_GLIBC="2.38"
+    # Captured first, not piped: under `set -o pipefail`, `head`/`grep -q`
+    # closing the pipe early gives ldd a SIGPIPE and fails the whole pipeline.
+    ldd_out=$(ldd --version 2>&1 || true)
+    ldd_first=${ldd_out%%$'\n'*}
+    host_glibc=""
+    case "$ldd_first" in
+      *[Gg][Ll][Ii][Bb][Cc]*|*"GNU libc"*) host_glibc=$(printf '%s\n' "$ldd_first" | grep -oE '[0-9]+\.[0-9]+$' || true) ;;
+    esac
+    if [ -z "$host_glibc" ]; then
+      err "${VERSION} only has glibc builds, and this system's glibc version could not be determined (musl-based distro?). Install a newer release, or build from source (see README)."
+    fi
+    lowest_glibc=$(printf '%s\n%s\n' "$MIN_GLIBC" "$host_glibc" | sort -V)
+    lowest_glibc=${lowest_glibc%%$'\n'*}
+    if [ "$lowest_glibc" != "$MIN_GLIBC" ]; then
+      err "${VERSION} only has glibc builds, which need glibc ${MIN_GLIBC} or newer; this system has ${host_glibc}. Install a newer release (they are statically linked), or build from source (see README)."
+    fi
+    ;;
+  *) err "unexpected HTTP ${probe_code} looking up ${VERSION} release assets for ${TARGET}" ;;
+esac
 log "Installing chimney-post ${VERSION} (${TARGET})"
 
 # A local WORKDIR (not TMPDIR) so this never shadows the environment
@@ -109,7 +146,6 @@ if [ -z "$WORKDIR" ] || [ ! -d "$WORKDIR" ]; then
 fi
 trap 'if [ -n "${WORKDIR:-}" ] && [ -d "$WORKDIR" ]; then rm -rf -- "$WORKDIR"; fi' EXIT
 
-DL_BASE="https://github.com/${REPO}/releases/download/${VERSION}"
 TARBALL="chimney-post-${VERSION}-${TARGET}.tar.gz"
 
 fetch() {
