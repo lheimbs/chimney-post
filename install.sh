@@ -115,15 +115,20 @@ case "$probe_code" in
     TARGET="${ARCH}-unknown-linux-gnu"
     # What the glibc builds of the older releases were linked against.
     MIN_GLIBC="2.38"
-    if ldd --version 2>&1 | head -n1 | grep -qiE 'glibc|gnu libc'; then
-      host_glibc=$(ldd --version 2>&1 | head -n1 | grep -oE '[0-9]+\.[0-9]+$' || true)
-    else
-      host_glibc=""
-    fi
+    # Captured first, not piped: under `set -o pipefail`, `head`/`grep -q`
+    # closing the pipe early gives ldd a SIGPIPE and fails the whole pipeline.
+    ldd_out=$(ldd --version 2>&1 || true)
+    ldd_first=${ldd_out%%$'\n'*}
+    host_glibc=""
+    case "$ldd_first" in
+      *[Gg][Ll][Ii][Bb][Cc]*|*"GNU libc"*) host_glibc=$(printf '%s\n' "$ldd_first" | grep -oE '[0-9]+\.[0-9]+$' || true) ;;
+    esac
     if [ -z "$host_glibc" ]; then
       err "${VERSION} only has glibc builds, and this system's glibc version could not be determined (musl-based distro?). Install a newer release, or build from source (see README)."
     fi
-    if [ "$(printf '%s\n' "$MIN_GLIBC" "$host_glibc" | sort -V | head -n1)" != "$MIN_GLIBC" ]; then
+    lowest_glibc=$(printf '%s\n%s\n' "$MIN_GLIBC" "$host_glibc" | sort -V)
+    lowest_glibc=${lowest_glibc%%$'\n'*}
+    if [ "$lowest_glibc" != "$MIN_GLIBC" ]; then
       err "${VERSION} only has glibc builds, which need glibc ${MIN_GLIBC} or newer; this system has ${host_glibc}. Install a newer release (they are statically linked), or build from source (see README)."
     fi
     ;;
