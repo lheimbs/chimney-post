@@ -449,6 +449,8 @@ mailx / cron  ──>  /usr/sbin/sendmail  ──>  SMTP 127.0.0.1:2525  ──>
 
 ### Recommended: `msmtp`
 
+> **OpenMediaVault:** do not install `msmtp-mta` there -- it replaces the postfix that OMV depends on and breaks the web UI. See [docs/openmediavault.md](docs/openmediavault.md) for relaying through the existing postfix instead.
+
 `msmtp` is the lightest option: no daemon, no spool, a single binary. `install.sh` (see [Quick Install](#quick-install-linux)) automates this step across Debian/Ubuntu, Fedora, RHEL-family (via EPEL), openSUSE, Arch, and (best-effort) Nix -- run it with `CHIMNEY_MTA=yes` to set msmtp up without the interactive prompt. The commands below are the manual equivalent, package names vary by distro:
 
 ```bash
