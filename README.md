@@ -100,11 +100,11 @@ On Arch, accepting the `msmtp` offer runs a full `pacman -Syu`, which upgrades e
 Release binaries for `x86_64` and `aarch64` Linux are published on the [Releases page](https://github.com/lheimbs/chimney-post/releases). This section documents the manual steps that `install.sh` above automates, useful if you want to inspect each step yourself.
 Each release tarball is signed with a cosign keyless signature (sigstore) and carries SLSA build provenance attested via GitHub Actions OIDC.
 
-Binaries are built on Ubuntu 24.04 and dynamically link glibc 2.39, so they run on Ubuntu 24.04+, Debian 13+, and anything else with glibc 2.39 or newer. On older distributions — including Debian 12 (glibc 2.36) and Ubuntu 22.04 (2.35) — build from source instead.
+Releases after v0.3.1 ship statically linked (musl) binaries, so they have no glibc requirement and run on any Linux distribution of the matching architecture, including older ones such as Debian 12 and Ubuntu 22.04. Releases up to and including v0.3.1 were instead dynamically linked against glibc 2.38+ and fail to start on older systems with `GLIBC_2.38 not found`; `install.sh` detects that and stops with a message instead of installing them. Use a newer release there, or build from source.
 
 Each tarball is built reproducibly: member order, timestamps and ownership are normalised, so rebuilding the same commit yields a byte-identical archive and therefore the same digest as the one that was signed and attested.
 
-In the commands below, replace `<version>` with the release tag (e.g. `v0.1.0`) and `<target>` with `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`.
+In the commands below, replace `<version>` with the release tag (e.g. `v0.1.0`) and `<target>` with `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl` (`-gnu` for releases up to v0.3.1).
 
 Download a tarball and its `.bundle` sidecar, then verify the signature. This needs **cosign v3.0 or newer** — the `.bundle` files are standard Sigstore bundles, which cosign v2.6.x can only read if you add `--new-bundle-format`, and cosign v2.5 and older cannot read at all:
 

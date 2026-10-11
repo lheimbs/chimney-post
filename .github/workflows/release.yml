@@ -96,16 +96,16 @@ jobs:
           # choice, not a hard requirement: no cross toolchain or cross
           # pkg-config sysroot to install or maintain.
           #
-          # Runner versions are pinned, not `ubuntu-latest`, because the runner's
-          # glibc sets the floor for where these binaries will run: 24.04 is
-          # glibc 2.39, so the binaries need Ubuntu 24.04+ / Debian 13+. Bumping
-          # this raises that floor -- a user-visible compatibility change, so it
-          # is a deliberate edit here rather than a silent `ubuntu-latest` drift.
-          # 22.04 (glibc 2.35) would also cover Debian 12, but those images begin
-          # deprecation on 2026-09-17 and are unsupported after 2027-04-17.
-          - target: x86_64-unknown-linux-gnu
+          # Statically linked musl binaries, not glibc ones: a glibc binary
+          # needs at least the glibc of the machine that built it (24.04 =
+          # 2.39), which turned away Debian 12 / Ubuntu 22.04 hosts with a
+          # loader error at service start. A static binary has no such floor,
+          # so the runner version no longer decides where it runs. Runners are
+          # still pinned rather than `ubuntu-latest` so the toolchain (musl-gcc
+          # for aws-lc and bundled SQLite) doesn't drift silently.
+          - target: x86_64-unknown-linux-musl
             runner: ubuntu-24.04
-          - target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -122,8 +122,16 @@ jobs:
       # SLSA provenance; a poisoned cache entry would produce a compromised
       # binary with a perfectly valid signature and attestation. Releases are
       # rare, so a cold build costs little.
+      # musl-gcc is the C compiler for the build scripts of aws-lc-sys and the
+      # bundled SQLite; Rust's own musl target supplies the libc and linker
+      # setup. Both runners are native, so the plain `musl-gcc` wrapper
+      # targets the right architecture on each.
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: |
+          export "CC_$(echo '${{ matrix.target }}' | tr - _)=musl-gcc"
+          cargo build --release --locked --target ${{ matrix.target }}
       # Built to be byte-identical across rebuilds of the same commit, so the
       # tarball digest in the signature and the SLSA attestation can be
       # independently reproduced. tar defaults (member order, mtimes, uid/gid,
@@ -156,12 +164,20 @@ jobs:
               -cf - -C staging chimney-post \
             | gzip -9n > "chimney-post-${VERSION}-${{ matrix.target }}.tar.gz"
       # Confirms the binary actually loads and runs on this architecture -- a
-      # linker or glibc problem shows up as a loader failure here rather than in
-      # a user's hands. There's no --version flag, so this asserts the binary
-      # reaches its own config loader and reports the missing file.
+      # linker problem shows up as a loader failure here rather than in a
+      # user's hands. There's no --version flag, so this asserts the binary
+      # reaches its own config loader and reports the missing file. It also
+      # asserts the binary is static: that is what keeps it runnable on hosts
+      # with an older glibc than this runner, which this runner can't test by
+      # running it.
       - name: Smoke test
         run: |
           set -uo pipefail
+          if ! ldd ./staging/chimney-post 2>&1 | grep -qE 'statically linked|not a dynamic executable'; then
+            echo "::error::binary is dynamically linked; it would not run on hosts with an older glibc" >&2
+            ldd ./staging/chimney-post >&2 || true
+            exit 1
+          fi
           out=$(CHIMNEY_CONFIG=/nonexistent/chimney-post.toml ./staging/chimney-post 2>&1) && rc=0 || rc=$?
           echo "$out"
           if [ "${rc:-0}" -ne 1 ]; then
@@ -384,8 +400,8 @@ jobs:
           # matrix should be a deliberate decision here too, not something that
           # silently starts shipping unattested.
           subject-path: |
-            artifacts/chimney-post-${{ env.VERSION }}-x86_64-unknown-linux-gnu.tar.gz
-            artifacts/chimney-post-${{ env.VERSION }}-aarch64-unknown-linux-gnu.tar.gz
+            artifacts/chimney-post-${{ env.VERSION }}-x86_64-unknown-linux-musl.tar.gz
+            artifacts/chimney-post-${{ env.VERSION }}-aarch64-unknown-linux-musl.tar.gz
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: signatures
@@ -446,7 +462,7 @@ jobs:
           body: |
             ## Verification
 
-            Replace `<target>` below with `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`.
+            Replace `<target>` below with `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`.
 
             ### SHA256 Checksums
 
