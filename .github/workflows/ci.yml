@@ -377,7 +377,7 @@ jobs:
             useradd -m -s /bin/bash runner
             echo "runner ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/runner
             chmod 0440 /etc/sudoers.d/runner
-            out=$(su -s /bin/bash runner -c "PATH=/usr/local/bin:/usr/bin:/bin CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_SKIP_VERIFY=1 bash /work/install.sh" 2>&1)
+            out=$(su -s /bin/bash runner -c "PATH=/usr/local/bin:/usr/bin:/bin CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_SKIP_VERIFY=1 CHIMNEY_SKIP_GLIBC_CHECK=1 bash /work/install.sh" 2>&1)
             echo "$out"
             case "$out" in
               *"already installed"*) ;;
@@ -405,7 +405,7 @@ jobs:
             chmod +x /home/runner/bin/nix
             chown -R runner /home/runner/bin
             rc=0
-            su runner -c "PATH=/home/runner/bin:/usr/local/bin:/usr/bin:/bin CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_SKIP_VERIFY=1 CHIMNEY_MTA=yes bash /work/install.sh" > /tmp/out 2>&1 || rc=$?
+            su runner -c "PATH=/home/runner/bin:/usr/local/bin:/usr/bin:/bin CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_SKIP_VERIFY=1 CHIMNEY_MTA=yes CHIMNEY_SKIP_GLIBC_CHECK=1 bash /work/install.sh" > /tmp/out 2>&1 || rc=$?
             cat /tmp/out
             if [ "$rc" -ne 0 ]; then
               echo "::error::installer exited $rc after skipping an optional msmtp setup" >&2
@@ -438,7 +438,7 @@ jobs:
             echo "runner ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/runner
             chmod 0440 /etc/sudoers.d/runner
             rc=0
-            su -s /bin/bash runner -c "CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_SKIP_VERIFY=1 CHIMNEY_MTA=yes bash /work/install.sh" > /tmp/out 2>&1 || rc=$?
+            su -s /bin/bash runner -c "CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_SKIP_VERIFY=1 CHIMNEY_MTA=yes CHIMNEY_SKIP_GLIBC_CHECK=1 bash /work/install.sh" > /tmp/out 2>&1 || rc=$?
             cat /tmp/out
             if [ "$rc" -ne 0 ]; then
               echo "::error::installer exited $rc over the optional mail client" >&2
@@ -476,7 +476,7 @@ jobs:
 
             test ! -d /run/systemd/system
             rc=0
-            su -s /bin/bash runner -c "CHIMNEY_SKIP_VERIFY=1 CHIMNEY_MTA=no bash /work/install.sh" > /tmp/out 2>&1 || rc=$?
+            su -s /bin/bash runner -c "CHIMNEY_SKIP_VERIFY=1 CHIMNEY_MTA=no CHIMNEY_SKIP_GLIBC_CHECK=1 bash /work/install.sh" > /tmp/out 2>&1 || rc=$?
             cat /tmp/out
             if [ "$rc" -ne 0 ]; then
               echo "::error::installer exited $rc because systemd is not the running init" >&2
@@ -490,7 +490,7 @@ jobs:
             # Now let the reload be attempted, and fail.
             mkdir -p /run/systemd/system
             rc=0
-            su -s /bin/bash runner -c "CHIMNEY_SKIP_VERIFY=1 CHIMNEY_MTA=no bash /work/install.sh" > /tmp/out2 2>&1 || rc=$?
+            su -s /bin/bash runner -c "CHIMNEY_SKIP_VERIFY=1 CHIMNEY_MTA=no CHIMNEY_SKIP_GLIBC_CHECK=1 bash /work/install.sh" > /tmp/out2 2>&1 || rc=$?
             cat /tmp/out2
             if [ "$rc" -ne 0 ]; then
               echo "::error::installer exited $rc over a failed daemon-reload" >&2
@@ -498,6 +498,25 @@ jobs:
             fi
             grep -q "Next steps" /tmp/out2
             grep -q "daemon-reload failed" /tmp/out2
+          '
+
+      # The glibc preflight itself. The steps above run on glibc 2.36 / musl
+      # hosts but test installer behaviour, never the binary, so they set
+      # CHIMNEY_SKIP_GLIBC_CHECK=1; this is the one that leaves the check on.
+      # Pinned to v0.3.1, the last release with only glibc builds, so it keeps
+      # meaning the same thing after newer releases ship static binaries.
+      - name: A glibc-only release is refused on a host with an older glibc
+        run: |
+          docker run --rm -v "$PWD/install.sh:/work/install.sh:ro" debian:12 bash -euxc '
+            apt-get update -qq
+            apt-get install -y -qq curl tar ca-certificates
+            rc=0
+            CHIMNEY_VERSION=v0.3.1 bash /work/install.sh > /tmp/out 2>&1 || rc=$?
+            cat /tmp/out
+            test "$rc" -ne 0
+            grep -q "glibc 2.38 or newer" /tmp/out
+            # Refused before anything was installed.
+            test ! -e /usr/local/bin/chimney-post
           '
 
   # install.sh's msmtp setup supports several OS families beyond Debian/Ubuntu
@@ -547,7 +566,7 @@ jobs:
             useradd -m -s /bin/bash runner
             echo "runner ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/runner
             chmod 0440 /etc/sudoers.d/runner
-            su -s /bin/bash runner -c "CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_MTA=yes bash /work/install.sh"
+            su -s /bin/bash runner -c "CHIMNEY_SKIP_SYSTEMD=1 CHIMNEY_MTA=yes CHIMNEY_SKIP_GLIBC_CHECK=1 bash /work/install.sh"
             # Checked as root, not via su: a non-login su on some distros
             # (openSUSE) strips PATH down to exclude /usr/sbin, where sendmail
             # lives -- a test-harness quirk, not something a real login shell hits.

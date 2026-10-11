@@ -23,6 +23,10 @@
 #   CHIMNEY_MTA             "ask" (default), "yes", or "no" -- whether to set
 #                           up msmtp as a sendmail-compatible MTA
 #   CHIMNEY_NONINTERACTIVE  1 to never prompt (CHIMNEY_MTA=ask then behaves as "no")
+#   CHIMNEY_SKIP_GLIBC_CHECK  1 to install a glibc-only release (v0.3.1 and
+#                           older) without checking the host's glibc first.
+#                           The binary will not start if the host is too old;
+#                           mainly for testing the installer itself.
 set -euo pipefail
 
 REPO="lheimbs/chimney-post"
@@ -34,6 +38,7 @@ SKIP_SYSTEMD="${CHIMNEY_SKIP_SYSTEMD:-0}"
 SKIP_VERIFY="${CHIMNEY_SKIP_VERIFY:-0}"
 MTA_MODE="${CHIMNEY_MTA:-ask}"
 NONINTERACTIVE="${CHIMNEY_NONINTERACTIVE:-0}"
+SKIP_GLIBC_CHECK="${CHIMNEY_SKIP_GLIBC_CHECK:-0}"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
@@ -113,23 +118,27 @@ case "$probe_code" in
   200|206) ;;
   404)
     TARGET="${ARCH}-unknown-linux-gnu"
-    # What the glibc builds of the older releases were linked against.
-    MIN_GLIBC="2.38"
-    # Captured first, not piped: under `set -o pipefail`, `head`/`grep -q`
-    # closing the pipe early gives ldd a SIGPIPE and fails the whole pipeline.
-    ldd_out=$(ldd --version 2>&1 || true)
-    ldd_first=${ldd_out%%$'\n'*}
-    host_glibc=""
-    case "$ldd_first" in
-      *[Gg][Ll][Ii][Bb][Cc]*|*"GNU libc"*) host_glibc=$(printf '%s\n' "$ldd_first" | grep -oE '[0-9]+\.[0-9]+$' || true) ;;
-    esac
-    if [ -z "$host_glibc" ]; then
-      err "${VERSION} only has glibc builds, and this system's glibc version could not be determined (musl-based distro?). Install a newer release, or build from source (see README)."
-    fi
-    lowest_glibc=$(printf '%s\n%s\n' "$MIN_GLIBC" "$host_glibc" | sort -V)
-    lowest_glibc=${lowest_glibc%%$'\n'*}
-    if [ "$lowest_glibc" != "$MIN_GLIBC" ]; then
-      err "${VERSION} only has glibc builds, which need glibc ${MIN_GLIBC} or newer; this system has ${host_glibc}. Install a newer release (they are statically linked), or build from source (see README)."
+    if [ "$SKIP_GLIBC_CHECK" = "1" ]; then
+      warn "CHIMNEY_SKIP_GLIBC_CHECK=1 -- not checking glibc. ${VERSION} only has glibc builds and will not start on a host with an older glibc."
+    else
+      # What the glibc builds of the older releases were linked against.
+      MIN_GLIBC="2.38"
+      # Captured first, not piped: under `set -o pipefail`, `head`/`grep -q`
+      # closing the pipe early gives ldd a SIGPIPE and fails the whole pipeline.
+      ldd_out=$(ldd --version 2>&1 || true)
+      ldd_first=${ldd_out%%$'\n'*}
+      host_glibc=""
+      case "$ldd_first" in
+        *[Gg][Ll][Ii][Bb][Cc]*|*"GNU libc"*) host_glibc=$(printf '%s\n' "$ldd_first" | grep -oE '[0-9]+\.[0-9]+$' || true) ;;
+      esac
+      if [ -z "$host_glibc" ]; then
+        err "${VERSION} only has glibc builds, and this system's glibc version could not be determined (musl-based distro?). Install a newer release, or build from source (see README)."
+      fi
+      lowest_glibc=$(printf '%s\n%s\n' "$MIN_GLIBC" "$host_glibc" | sort -V)
+      lowest_glibc=${lowest_glibc%%$'\n'*}
+      if [ "$lowest_glibc" != "$MIN_GLIBC" ]; then
+        err "${VERSION} only has glibc builds, which need glibc ${MIN_GLIBC} or newer; this system has ${host_glibc}. Install a newer release (they are statically linked), or build from source (see README)."
+      fi
     fi
     ;;
   *) err "unexpected HTTP ${probe_code} looking up ${VERSION} release assets for ${TARGET}" ;;
