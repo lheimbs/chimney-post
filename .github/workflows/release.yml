@@ -173,9 +173,13 @@ jobs:
       - name: Smoke test
         run: |
           set -uo pipefail
-          if ! ldd ./staging/chimney-post 2>&1 | grep -qE 'statically linked|not a dynamic executable'; then
+          # Capture first: ldd exits non-zero ("not a dynamic executable") on
+          # static binaries on some distros, which pipefail would turn into
+          # a false failure.
+          ldd_out=$(ldd ./staging/chimney-post 2>&1 || true)
+          if ! grep -qE 'statically linked|not a dynamic executable' <<<"$ldd_out"; then
             echo "::error::binary is dynamically linked; it would not run on hosts with an older glibc" >&2
-            ldd ./staging/chimney-post >&2 || true
+            echo "$ldd_out" >&2
             exit 1
           fi
           out=$(CHIMNEY_CONFIG=/nonexistent/chimney-post.toml ./staging/chimney-post 2>&1) && rc=0 || rc=$?
