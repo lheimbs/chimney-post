@@ -69,9 +69,10 @@ jobs:
           export CC_x86_64_unknown_linux_musl=musl-gcc
           cargo build --release --locked --target x86_64-unknown-linux-musl
           bin=target/x86_64-unknown-linux-musl/release/chimney-post
-          if ! ldd "$bin" 2>&1 | grep -qE 'statically linked|not a dynamic executable'; then
+          ldd_out=$(ldd "$bin" 2>&1 || true)
+          if ! grep -qE 'statically linked|not a dynamic executable' <<<"$ldd_out"; then
             echo "::error::musl build is dynamically linked" >&2
-            ldd "$bin" >&2 || true
+            echo "$ldd_out" >&2
             exit 1
           fi
 
