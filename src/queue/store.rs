@@ -67,6 +67,47 @@ const MIGRATIONS: &[&str] = &[
      ALTER TABLE outbox ADD COLUMN reply_to TEXT;
      ALTER TABLE dead_letter ADD COLUMN message_id TEXT;
      ALTER TABLE dead_letter ADD COLUMN reply_to TEXT;",
+    // 2: answering forwarded emails from Matrix (see queue/replies.rs).
+    "CREATE TABLE reply_targets (
+         event_id        TEXT PRIMARY KEY,
+         room_id         TEXT NOT NULL,
+         reply_to        TEXT NOT NULL,
+         message_id      TEXT,
+         subject         TEXT,
+         created_at      INTEGER NOT NULL
+     );
+     CREATE INDEX idx_reply_targets_created ON reply_targets(created_at);
+     CREATE TABLE reply_events (
+         event_id        TEXT PRIMARY KEY,
+         accepted_at     INTEGER NOT NULL
+     );
+     CREATE INDEX idx_reply_events_accepted ON reply_events(accepted_at);
+     CREATE TABLE reply_outbox (
+         id              INTEGER PRIMARY KEY AUTOINCREMENT,
+         event_id        TEXT NOT NULL,
+         room_id         TEXT NOT NULL,
+         to_addr         TEXT NOT NULL,
+         subject         TEXT NOT NULL,
+         in_reply_to     TEXT,
+         body            TEXT NOT NULL,
+         attempts        INTEGER NOT NULL DEFAULT 0,
+         next_attempt_at INTEGER NOT NULL DEFAULT 0,
+         created_at      INTEGER NOT NULL
+     );
+     CREATE INDEX idx_reply_outbox_ready ON reply_outbox(next_attempt_at, id);
+     CREATE TABLE reply_dead_letter (
+         id              INTEGER PRIMARY KEY AUTOINCREMENT,
+         event_id        TEXT NOT NULL,
+         room_id         TEXT NOT NULL,
+         to_addr         TEXT NOT NULL,
+         subject         TEXT NOT NULL,
+         in_reply_to     TEXT,
+         body            TEXT NOT NULL,
+         attempts        INTEGER NOT NULL,
+         created_at      INTEGER NOT NULL,
+         failed_at       INTEGER NOT NULL,
+         last_error      TEXT NOT NULL
+     );",
 ];
 
 /// Apply every migration in [`MIGRATIONS`] the database has not seen yet, each
@@ -94,6 +135,8 @@ fn migrate(conn: &Connection) -> Result<()> {
 pub struct MessageStore {
     conn: Arc<Mutex<Connection>>,
     notify: Arc<Notify>,
+    /// Wakes the reply worker when an answer is queued (see `replies.rs`).
+    pub(super) reply_notify: Arc<Notify>,
     /// Maximum number of messages allowed in the outbox; 0 means unlimited.
     max_len: usize,
 }
@@ -130,13 +173,14 @@ impl MessageStore {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             notify: Arc::new(Notify::new()),
+            reply_notify: Arc::new(Notify::new()),
             max_len,
         })
     }
 
     /// Open an in-memory database. Convenience wrapper around [`open`].
     #[cfg(test)]
-    pub async fn open_in_memory() -> Result<Self> {
+    pub(crate) async fn open_in_memory() -> Result<Self> {
         Self::open(":memory:").await
     }
 
@@ -292,7 +336,7 @@ impl MessageStore {
 
     /// Run a closure with exclusive access to the database connection on a
     /// blocking thread, keeping SQLite work off the async runtime.
-    async fn with_conn<T, F>(&self, f: F) -> Result<T>
+    pub(super) async fn with_conn<T, F>(&self, f: F) -> Result<T>
     where
         F: FnOnce(&Connection) -> Result<T> + Send + 'static,
         T: Send + 'static,

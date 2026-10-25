@@ -537,7 +537,7 @@ async fn message_survives_crash_and_is_redelivered_on_restart() {
             let body = message.body.clone();
             Box::pin(async move {
                 delivered.lock().unwrap().push(body);
-                Ok(())
+                Ok(None)
             })
         }
     }

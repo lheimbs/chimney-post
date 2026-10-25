@@ -1,3 +1,4 @@
+use super::replies::ReplyTarget;
 use super::store::{unix_now, Message, MessageStore, StoredMessage};
 use crate::error::Result;
 use std::future::Future;
@@ -10,13 +11,23 @@ use tracing::{error, info, warn};
 /// A boxed, `Send` future returning a delivery result. Used by [`MessageSink`]
 /// so the worker can stay generic without requiring `async fn` in traits
 /// (which is unavailable on the project's MSRV).
-pub type DeliveryFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+pub type DeliveryFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<Delivered>>> + Send + 'a>>;
+
+/// Where a delivered message ended up, reported by a [`MessageSink`] that
+/// wants the message to be answerable from there (see `[reply]`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Delivered {
+    pub room_id: String,
+    pub event_id: String,
+}
 
 /// Something that can deliver a message (e.g. the Matrix client). Abstracted so
 /// the delivery worker can be tested without a live homeserver.
 ///
 /// `idempotency_key` is stable for a given queued message across retries, so a
-/// sink can deduplicate a redelivery (e.g. after a lost response).
+/// sink can deduplicate a redelivery (e.g. after a lost response). A sink
+/// returns `Some(Delivered)` to have the message recorded as answerable, or
+/// `None` when answers are not wanted.
 pub trait MessageSink: Send + Sync {
     fn deliver<'a>(&'a self, message: &'a Message, idempotency_key: &'a str) -> DeliveryFuture<'a>;
 }
@@ -114,7 +125,7 @@ impl<S: MessageSink> DeliveryWorker<S> {
         // Stable across retries of this row, so the sink can dedupe a redelivery.
         let idempotency_key = format!("chimney-post-{id}");
         match self.sink.deliver(&stored.message, &idempotency_key).await {
-            Ok(()) => match self.store.mark_delivered(id).await {
+            Ok(delivered) => match self.finish_delivery(stored, delivered).await {
                 Ok(()) => info!(id, "message delivered to Matrix"),
                 Err(error) => error!(
                     id, %error,
@@ -122,6 +133,30 @@ impl<S: MessageSink> DeliveryWorker<S> {
                 ),
             },
             Err(error) => self.handle_failure(stored, now, error).await,
+        }
+    }
+
+    /// Remove a delivered message from the outbox, recording where it can be
+    /// answered when the sink reported a location and the email has a reply
+    /// address.
+    async fn finish_delivery(
+        &self,
+        stored: StoredMessage,
+        delivered: Option<Delivered>,
+    ) -> Result<()> {
+        let message = stored.message;
+        match (delivered, message.reply_to) {
+            (Some(delivered), Some(reply_to)) => {
+                let target = ReplyTarget {
+                    event_id: delivered.event_id,
+                    room_id: delivered.room_id,
+                    reply_to,
+                    message_id: message.message_id,
+                    subject: message.subject,
+                };
+                self.store.mark_delivered_as(stored.id, target).await
+            }
+            _ => self.store.mark_delivered(stored.id).await,
         }
     }
 
@@ -229,6 +264,9 @@ mod tests {
         fail_first: AtomicUsize,
         always_fail: bool,
         fail_if_body_contains: Option<String>,
+        /// Report each delivery as `$event-<key>` in `!room:x`, like the
+        /// Matrix client does with `[reply]` enabled.
+        report_delivered: bool,
     }
 
     #[derive(Clone, Default)]
@@ -295,7 +333,7 @@ mod tests {
             let key = idempotency_key.to_string();
             Box::pin(async move {
                 inner.calls.fetch_add(1, Ordering::SeqCst);
-                inner.keys.lock().unwrap().push(key);
+                inner.keys.lock().unwrap().push(key.clone());
 
                 if inner.always_fail {
                     return Err(ChimneyError::Matrix("forced failure".into()));
@@ -311,7 +349,10 @@ mod tests {
                 }
 
                 inner.delivered.lock().unwrap().push(message);
-                Ok(())
+                Ok(inner.report_delivered.then(|| Delivered {
+                    room_id: "!room:x".to_string(),
+                    event_id: format!("$event-{key}"),
+                }))
             })
         }
     }
@@ -368,6 +409,49 @@ mod tests {
         assert_eq!(backoff_seconds(60, 10, 900), 900);
         // A zero base stays zero (used for fast retries in tests).
         assert_eq!(backoff_seconds(0, 5, 900), 0);
+    }
+
+    #[tokio::test]
+    async fn records_where_an_answerable_message_was_delivered() {
+        let store = MessageStore::open_in_memory().await.unwrap();
+        let answerable = store
+            .enqueue(&Message {
+                reply_to: Some("app@x.com".into()),
+                message_id: Some("<1@x.com>".into()),
+                ..msg("ping")
+            })
+            .await
+            .unwrap();
+        let no_address = store.enqueue(&msg("no reply address")).await.unwrap();
+        let sink = FakeSink {
+            inner: Arc::new(FakeInner {
+                report_delivered: true,
+                ..Default::default()
+            }),
+        };
+
+        let (tx, handle) = spawn_worker(store.clone(), sink, 5, 60, false);
+        wait_for_len(&store, 0).await;
+        tx.send(true).unwrap();
+        handle.await.unwrap();
+
+        let target = store
+            .reply_target(&format!("$event-chimney-post-{answerable}"), 3600)
+            .await
+            .unwrap()
+            .expect("the answerable message is recorded");
+        assert_eq!(target.room_id, "!room:x");
+        assert_eq!(target.reply_to, "app@x.com");
+        assert_eq!(target.message_id.as_deref(), Some("<1@x.com>"));
+        assert_eq!(target.subject.as_deref(), Some("s"));
+        // Nothing to answer without an address.
+        assert_eq!(
+            store
+                .reply_target(&format!("$event-chimney-post-{no_address}"), 3600)
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test]

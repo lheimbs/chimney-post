@@ -352,7 +352,10 @@ impl MatrixClient {
 
 impl MessageSink for MatrixClient {
     fn deliver<'a>(&'a self, message: &'a Message, idempotency_key: &'a str) -> DeliveryFuture<'a> {
-        Box::pin(self.send_message(message, idempotency_key))
+        Box::pin(async move {
+            self.send_message(message, idempotency_key).await?;
+            Ok(None)
+        })
     }
 }
 
