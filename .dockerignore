@@ -13,3 +13,5 @@ config.toml
 # hint the file was filtered. The Dockerfile's COPY list is explicit, so
 # nothing enters the image because of this.
 chimney-post_banner.png
+compose.example.yaml
+compose.verify.yaml
