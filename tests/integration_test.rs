@@ -1,5 +1,5 @@
 use chimney_post::config::{
-    Config, LoggingConfig, MatrixConfig, MatrixCredentials, QueueConfig, SmtpConfig,
+    Config, LoggingConfig, MatrixConfig, MatrixCredentials, QueueConfig, ReplyConfig, SmtpConfig,
     DEFAULT_MESSAGE_TEMPLATE,
 };
 use chimney_post::queue::MessageStore;
@@ -50,6 +50,7 @@ fn test_config(bind: &str, max_message_size: usize) -> Config {
             db_path: ":memory:".to_string(),
             max_len: 0,
         },
+        reply: ReplyConfig::default(),
     }
 }
 

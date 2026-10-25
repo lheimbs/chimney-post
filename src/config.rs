@@ -4,7 +4,7 @@ use matrix_sdk::ruma::OwnedUserId;
 use serde::Deserialize;
 use std::env;
 use std::fs;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 
 pub const DEFAULT_MESSAGE_TEMPLATE: &str = "\
@@ -26,6 +26,9 @@ pub struct Config {
     pub matrix: MatrixConfig,
     pub logging: LoggingConfig,
     pub queue: QueueConfig,
+    /// Answering forwarded emails from Matrix. Absent (the default) means off.
+    #[serde(default)]
+    pub reply: ReplyConfig,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -141,6 +144,113 @@ fn default_queue_db_path() -> String {
 
 fn default_queue_max_len() -> usize {
     10_000
+}
+
+/// Answering forwarded emails from Matrix (`[reply]`): a Matrix reply to a
+/// forwarded email, in the strict format below and from an allowed sender, is
+/// sent back to that email's reply address through `[reply.smtp]`.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ReplyConfig {
+    /// Off by default; nothing is synced from Matrix or sent by email unless set.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Matrix user ids whose replies are acted on. Everyone else is ignored.
+    #[serde(default)]
+    pub allowed_senders: Vec<String>,
+    /// A Matrix reply is only treated as an email answer when its text starts
+    /// with this word, so ordinary chat in the room never sends mail.
+    #[serde(default = "default_reply_prefix")]
+    pub prefix: String,
+    /// Refuse replies sent from a device its owner has not cross-signed, so a
+    /// stolen access token on a fresh device cannot send mail.
+    #[serde(default = "default_true")]
+    pub require_cross_signed_device: bool,
+    /// How long after delivery a forwarded email can still be answered.
+    #[serde(default = "default_reply_max_age_hours")]
+    pub max_age_hours: u64,
+    /// Longest answer accepted, in characters.
+    #[serde(default = "default_reply_max_body_len")]
+    pub max_body_len: usize,
+    /// Most answers accepted in any rolling hour, across all rooms.
+    #[serde(default = "default_reply_max_per_hour")]
+    pub max_per_hour: u32,
+    /// `From` address of outgoing answers.
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub smtp: ReplySmtpConfig,
+}
+
+/// The SMTP server answers are submitted to.
+#[derive(Clone, Default, Deserialize)]
+pub struct ReplySmtpConfig {
+    #[serde(default)]
+    pub host: String,
+    /// Defaults to the standard port for `security`: 465, 587 or 25.
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub security: SmtpSecurity,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+impl ReplySmtpConfig {
+    /// The configured port, or the standard one for the security mode.
+    pub fn port(&self) -> u16 {
+        self.port.unwrap_or(match self.security {
+            SmtpSecurity::Tls => 465,
+            SmtpSecurity::Starttls => 587,
+            SmtpSecurity::None => 25,
+        })
+    }
+}
+
+impl std::fmt::Debug for ReplySmtpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplySmtpConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("security", &self.security)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+/// Transport security for `[reply.smtp]`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SmtpSecurity {
+    /// Implicit TLS from the first byte (port 465).
+    Tls,
+    /// Plain connection upgraded with STARTTLS, which is required (port 587).
+    #[default]
+    Starttls,
+    /// No encryption. Only accepted for a loopback host, i.e. a local MTA.
+    None,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_reply_prefix() -> String {
+    "!reply".to_string()
+}
+
+fn default_reply_max_age_hours() -> u64 {
+    168
+}
+
+fn default_reply_max_body_len() -> usize {
+    4000
+}
+
+fn default_reply_max_per_hour() -> u32 {
+    20
 }
 
 impl Config {
@@ -306,6 +416,82 @@ impl Config {
             })?;
         }
 
+        if self.reply.enabled {
+            self.validate_reply()?;
+        }
+
+        Ok(())
+    }
+
+    fn validate_reply(&self) -> Result<()> {
+        let reply = &self.reply;
+
+        if reply.allowed_senders.is_empty() {
+            return Err(ChimneyError::Config(
+                "reply.allowed_senders must list at least one Matrix user when reply.enabled \
+                 is set"
+                    .to_string(),
+            ));
+        }
+        for (index, sender) in reply.allowed_senders.iter().enumerate() {
+            let user_id: OwnedUserId = sender.parse().map_err(|error| {
+                ChimneyError::Config(format!("invalid reply.allowed_senders[{index}]: {error}"))
+            })?;
+            if user_id.as_str() == self.matrix.user_id {
+                return Err(ChimneyError::Config(format!(
+                    "reply.allowed_senders[{index}] is the bot's own matrix.user_id"
+                )));
+            }
+        }
+
+        if reply.prefix.is_empty()
+            || reply.prefix.chars().count() > 32
+            || reply
+                .prefix
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(ChimneyError::Config(
+                "reply.prefix must be a single word of at most 32 characters".to_string(),
+            ));
+        }
+
+        for (name, value) in [
+            ("max_age_hours", reply.max_age_hours as u128),
+            ("max_body_len", reply.max_body_len as u128),
+            ("max_per_hour", reply.max_per_hour as u128),
+        ] {
+            if value == 0 {
+                return Err(ChimneyError::Config(format!(
+                    "reply.{name} must be greater than zero"
+                )));
+            }
+        }
+
+        reply
+            .from
+            .parse::<lettre::Address>()
+            .map_err(|error| ChimneyError::Config(format!("invalid reply.from: {error}")))?;
+
+        let smtp = &reply.smtp;
+        if is_blank(&smtp.host) {
+            return Err(ChimneyError::Config(
+                "reply.smtp.host must not be empty".to_string(),
+            ));
+        }
+        if smtp.security == SmtpSecurity::None && !is_loopback_host(&smtp.host) {
+            return Err(ChimneyError::Config(
+                "reply.smtp.security = \"none\" is only allowed for a loopback host \
+                 (a local MTA); use \"starttls\" or \"tls\" for a remote server"
+                    .to_string(),
+            ));
+        }
+        if smtp.username.is_some() != smtp.password.is_some() {
+            return Err(ChimneyError::Config(
+                "reply.smtp.username and reply.smtp.password must be set together".to_string(),
+            ));
+        }
+
         Ok(())
     }
 
@@ -338,12 +524,42 @@ impl Config {
                 })?);
         }
 
+        if self.reply.smtp.username.as_deref() == Some("${REPLY_SMTP_USERNAME}") {
+            self.reply.smtp.username = Some(env::var("REPLY_SMTP_USERNAME").map_err(|_| {
+                ChimneyError::Config(
+                    "config references ${REPLY_SMTP_USERNAME} but the env var is not set"
+                        .to_string(),
+                )
+            })?);
+        }
+
+        if self.reply.smtp.password.as_deref() == Some("${REPLY_SMTP_PASSWORD}") {
+            self.reply.smtp.password = Some(env::var("REPLY_SMTP_PASSWORD").map_err(|_| {
+                ChimneyError::Config(
+                    "config references ${REPLY_SMTP_PASSWORD} but the env var is not set"
+                        .to_string(),
+                )
+            })?);
+        }
+
         Ok(())
     }
 }
 
 fn is_blank(value: &str) -> bool {
     value.trim().is_empty()
+}
+
+/// True for `localhost` and loopback IP literals -- the only hosts a reply may
+/// be submitted to without TLS. Names other than `localhost` are not resolved:
+/// what a name points at can change after startup.
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 #[cfg(test)]
@@ -385,6 +601,7 @@ mod tests {
                 db_path: "/tmp/queue.db".to_string(),
                 max_len: 0,
             },
+            reply: ReplyConfig::default(),
         };
 
         let result = config.validate();
@@ -533,5 +750,106 @@ mod tests {
         ] {
             assert!(text.contains(key), "config.example.toml is missing `{key}`");
         }
+    }
+
+    fn valid_reply_config() -> Config {
+        let mut config = valid_config();
+        config.reply = ReplyConfig {
+            enabled: true,
+            allowed_senders: vec!["@me:example.org".to_string()],
+            prefix: default_reply_prefix(),
+            require_cross_signed_device: true,
+            max_age_hours: 168,
+            max_body_len: 4000,
+            max_per_hour: 20,
+            from: "chimney-post@example.org".to_string(),
+            smtp: ReplySmtpConfig {
+                host: "smtp.example.org".to_string(),
+                ..Default::default()
+            },
+        };
+        config
+    }
+
+    #[test]
+    fn reply_is_off_and_unvalidated_by_default() {
+        let config = valid_config();
+        assert!(!config.reply.enabled);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_a_complete_reply_section() {
+        assert!(valid_reply_config().validate().is_ok());
+    }
+
+    /// Breaks one setting of an otherwise valid config.
+    type Breaker = fn(&mut Config);
+
+    #[test]
+    fn validate_reply_rejects_bad_settings() {
+        let cases: Vec<(Breaker, &str)> = vec![
+            (|c| c.reply.allowed_senders.clear(), "allowed_senders"),
+            (
+                |c| c.reply.allowed_senders = vec!["me".to_string()],
+                "allowed_senders[0]",
+            ),
+            (
+                |c| c.reply.allowed_senders = vec![c.matrix.user_id.clone()],
+                "bot's own",
+            ),
+            (|c| c.reply.prefix = String::new(), "reply.prefix"),
+            (|c| c.reply.prefix = "re ply".to_string(), "reply.prefix"),
+            (|c| c.reply.max_age_hours = 0, "max_age_hours"),
+            (|c| c.reply.max_body_len = 0, "max_body_len"),
+            (|c| c.reply.max_per_hour = 0, "max_per_hour"),
+            (|c| c.reply.from = "nope".to_string(), "reply.from"),
+            (|c| c.reply.smtp.host = " ".to_string(), "reply.smtp.host"),
+            (|c| c.reply.smtp.security = SmtpSecurity::None, "loopback"),
+            (
+                |c| c.reply.smtp.username = Some("user".to_string()),
+                "set together",
+            ),
+        ];
+        for (break_it, expected) in cases {
+            let mut config = valid_reply_config();
+            break_it(&mut config);
+            let err = config.validate().unwrap_err().to_string();
+            assert!(err.contains(expected), "expected `{expected}` in `{err}`");
+        }
+    }
+
+    #[test]
+    fn plaintext_reply_smtp_is_allowed_only_on_loopback() {
+        for host in ["localhost", "127.0.0.1", "::1", "[::1]"] {
+            let mut config = valid_reply_config();
+            config.reply.smtp.host = host.to_string();
+            config.reply.smtp.security = SmtpSecurity::None;
+            assert!(config.validate().is_ok(), "{host}");
+        }
+        for host in ["10.0.0.1", "mail.localhost.example.com", "localhost.evil"] {
+            assert!(!is_loopback_host(host), "{host}");
+        }
+    }
+
+    #[test]
+    fn reply_smtp_port_defaults_follow_security() {
+        let mut smtp = ReplySmtpConfig::default();
+        assert_eq!(smtp.port(), 587);
+        smtp.security = SmtpSecurity::Tls;
+        assert_eq!(smtp.port(), 465);
+        smtp.security = SmtpSecurity::None;
+        assert_eq!(smtp.port(), 25);
+        smtp.port = Some(2525);
+        assert_eq!(smtp.port(), 2525);
+    }
+
+    #[test]
+    fn reply_smtp_password_is_redacted_in_debug() {
+        let smtp = ReplySmtpConfig {
+            password: Some("hunter2".to_string()),
+            ..Default::default()
+        };
+        assert!(!format!("{smtp:?}").contains("hunter2"));
     }
 }

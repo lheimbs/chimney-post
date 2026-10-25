@@ -34,6 +34,19 @@ validator = "0.20"
 # container builds; its only notable transitive dependency is encoding_rs (via
 # `charset`) for non-UTF-8 part charsets.
 mailparse = "0.17"
+# SMTP client for answers sent from Matrix ([reply]), and the address parser
+# validating them. Only the tokio + rustls (aws-lc-rs) transport is enabled:
+# no native-tls/OpenSSL, and certificates are checked by the same
+# rustls-platform-verifier matrix-sdk already pulls in, so the system trust
+# store applies to both.
+lettre = { version = "0.11.23", default-features = false, features = [
+    "builder",
+    "smtp-transport",
+    "tokio1",
+    "tokio1-rustls",
+    "aws-lc-rs",
+    "rustls-platform-verifier",
+] }
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "io-util", "net", "time"] }
