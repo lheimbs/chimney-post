@@ -690,3 +690,46 @@ async fn smtp_queues_a_multipart_message_as_readable_text() {
 
     server_handle.abort();
 }
+
+/// An answer from Matrix is submitted over real SMTP (lettre's transport, in
+/// the plaintext-to-loopback mode a local MTA uses), with this crate's own SMTP
+/// server standing in for the MTA.
+#[tokio::test]
+async fn answer_is_submitted_over_smtp() {
+    use chimney_post::config::{ReplySmtpConfig, SmtpSecurity};
+    use chimney_post::queue::ReplyTarget;
+    use chimney_post::reply::{answer, build_email, MailTransport, SmtpTransport};
+
+    let (bind, store, server_handle) = start_test_server(test_config("127.0.0.1:0", 10240)).await;
+    let port: u16 = bind.rsplit(':').next().unwrap().parse().unwrap();
+
+    let transport = SmtpTransport::from_config(&ReplySmtpConfig {
+        host: "127.0.0.1".to_string(),
+        port: Some(port),
+        security: SmtpSecurity::None,
+        ..Default::default()
+    })
+    .unwrap();
+    let target = ReplyTarget {
+        event_id: "$email:example.org".to_string(),
+        room_id: "!room:example.org".to_string(),
+        reply_to: "app@example.com".to_string(),
+        message_id: Some("<ping.1@example.com>".to_string()),
+        subject: Some("ping".to_string()),
+    };
+    let reply = answer(&target, "$answer:example.org", "pong");
+    let email = build_email(&"chimney-post@example.org".parse().unwrap(), &reply).unwrap();
+
+    transport.send(email).await.unwrap();
+
+    let received = store.claim_next_ready(now_secs()).await.unwrap().unwrap();
+    assert_eq!(
+        received.message.from.as_deref(),
+        Some("chimney-post@example.org")
+    );
+    assert_eq!(received.message.to, vec!["app@example.com".to_string()]);
+    assert_eq!(received.message.subject.as_deref(), Some("Re: ping"));
+    assert_eq!(received.message.body.trim(), "pong");
+
+    server_handle.abort();
+}
