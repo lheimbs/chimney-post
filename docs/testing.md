@@ -148,6 +148,33 @@ Expected:
 - Message is forwarded once to the configured Matrix room.
 - Recipient list is preserved in the formatted output.
 
+### H) Answering from Matrix (`[reply]`)
+
+Configure `[reply]` with your own user in `allowed_senders` and an SMTP server
+you can read mail from. A local MTA works with `security = "none"` and host
+`127.0.0.1`. Then send an email whose `From`/`Reply-To` is a mailbox you can
+read.
+
+1. Reply to the forwarded message in Matrix with `!reply pong`.
+2. Reply with `!reply pong` in a thread, and also send it as a standalone
+   message.
+3. Reply with `thanks` (no prefix).
+4. Reply with `!reply pong` from a second account that is not in
+   `allowed_senders`.
+5. Reply with `!reply pong` from a session you have not verified
+   (cross-signed).
+6. Restart the service and check that the answer from step 1 is not sent
+   again.
+
+Expected:
+
+- Step 1: an email arrives with subject `Re: <original subject>` and
+  `In-Reply-To` set to the original's Message-ID, and the bot reacts with ✅.
+- Step 2: no email; the bot replies with a `Not sent: ...` notice.
+- Steps 3 and 4: no email and no notice.
+- Step 5: no email; the notice says the device is not cross-signed.
+- Step 6: only one email in total for step 1.
+
 ## Security and Safety Checks
 
 ### 1) Local-only default

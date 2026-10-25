@@ -110,3 +110,45 @@ db_path = "/var/lib/chimney-post/queue.db"
 # Maximum number of messages held in the outbox before new mail is refused with
 # a temporary 451 (backpressure, e.g. while Matrix is unreachable). 0 = unlimited.
 max_len = 10000
+
+# Answering forwarded emails from Matrix (off by default). When enabled, a
+# Matrix reply to a forwarded email is sent back by email to that email's
+# reply address (its Reply-To, else its From header) -- see docs/replies.md.
+# Only replies in this strict format are sent:
+#
+#   !reply <your answer>
+#
+# sent as a Matrix *reply* (not in a thread) to the forwarded email, by a user
+# in allowed_senders, end-to-end encrypted, from a cross-signed device, within
+# max_age_hours of the email's delivery. Anything else without the prefix is
+# ignored; with the prefix, the bot says in the room why it was not sent.
+#
+# [reply]
+# enabled = true
+# # Matrix users allowed to answer. Everyone else in the room is ignored.
+# allowed_senders = ["@you:example.com"]
+# # From address of the answers.
+# from = "chimney-post@example.com"
+# # The word an answer must start with (default "!reply").
+# prefix = "!reply"
+# # Refuse answers from devices their owner has not cross-signed (default true).
+# require_cross_signed_device = true
+# # How long after delivery an email can still be answered (default 168 = 7 days).
+# max_age_hours = 168
+# # Longest answer accepted, in characters (default 4000).
+# max_body_len = 4000
+# # Most answers accepted in any rolling hour (default 20).
+# max_per_hour = 20
+#
+# [reply.smtp]
+# # Server the answers are submitted to. Retries follow [queue] max_retries /
+# # retry_backoff.
+# host = "smtp.example.com"
+# # "starttls" (default, port 587) or "tls" (implicit TLS, port 465) -- both
+# # require a valid certificate. "none" (port 25) is only accepted for a
+# # loopback host, i.e. a local MTA such as postfix on 127.0.0.1.
+# security = "starttls"
+# # port = 587
+# # Optional; set both or neither, preferably from the environment.
+# username = "${REPLY_SMTP_USERNAME}"
+# password = "${REPLY_SMTP_PASSWORD}"

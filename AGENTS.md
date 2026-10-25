@@ -27,6 +27,11 @@ Key properties that shape most design decisions:
 - The SMTP listener and the Matrix delivery worker are decoupled: SMTP starts
   accepting and queuing mail immediately, independent of whether the Matrix
   connection is up yet.
+- Answering from Matrix (`[reply]`, `docs/replies.md`) is the only outbound
+  email path, and it is off by default. It only sends to the recorded reply
+  address of an email that was delivered to the same room. The sender must
+  be allowlisted and the reply must be E2EE from a cross-signed device, in
+  the strict format. Keep every one of those checks.
 
 See `README.md` for the full feature list, configuration reference, and
 `docs/session-persistence.md` / `docs/testing.md` for deeper topic guides —
@@ -52,8 +57,9 @@ Module layout (`src/`):
 | `config` | `config.rs` | TOML config loading, env-var substitution, validation (e.g. rejecting unparseable SMTP bind addresses, invalid Matrix IDs). |
 | `error` | `error.rs` | Single `ChimneyError` enum (`thiserror`) and the crate-wide `Result<T>` alias. |
 | `smtp` | `smtp/server.rs`, `smtp/parser.rs` | Async SMTP session handling and email parsing (headers, folded-header unfolding, body extraction). |
-| `matrix` | `matrix/client.rs`, `matrix/formatter.rs`, `matrix/routing.rs` | Matrix login/connect (password or access-token), MiniJinja message formatting, and recipient/sender-based room routing. |
-| `queue` | `queue/store.rs`, `queue/worker.rs` | SQLite-backed durable outbox (`MessageStore`) and the delivery worker (retry with exponential backoff, dead-lettering, reconnect-on-failure). |
+| `matrix` | `matrix/client.rs`, `matrix/formatter.rs`, `matrix/routing.rs`, `matrix/replies.rs` | Matrix login/connect (password or access-token), MiniJinja message formatting, recipient/sender-based room routing, and (with `[reply]`) the handler that accepts email answers posted in Matrix. |
+| `queue` | `queue/store.rs`, `queue/worker.rs`, `queue/replies.rs` | SQLite-backed durable outbox (`MessageStore`, schema migrations via `PRAGMA user_version`), the delivery worker (retry with exponential backoff, dead-lettering, reconnect-on-failure), and the reply targets/outbox. |
+| `reply` | `reply/format.rs`, `reply/mail.rs`, `reply/worker.rs` | Optional Matrix → email answers: the strict reply format, building/submitting the answer email (lettre, TLS-only except to loopback), and the reply worker. See `docs/replies.md`. |
 | `main` | `main.rs` | Orchestration: binds SMTP first (readiness point), spawns the SMTP server and delivery worker as independent tasks, handles graceful shutdown (drain queue, systemd notify/watchdog). |
 
 `lib.rs` just re-exports the modules — treat it as the public surface when

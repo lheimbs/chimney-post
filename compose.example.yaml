@@ -35,6 +35,9 @@ services:
       MATRIX_PASSWORD: ${MATRIX_PASSWORD:?set MATRIX_PASSWORD in .env}
       # Using an access token instead? Replace the line above with:
       # MATRIX_ACCESS_TOKEN: ${MATRIX_ACCESS_TOKEN:?set MATRIX_ACCESS_TOKEN in .env}
+      # Answering from Matrix ([reply], docs/replies.md) with SMTP credentials?
+      # REPLY_SMTP_USERNAME: ${REPLY_SMTP_USERNAME:?set REPLY_SMTP_USERNAME in .env}
+      # REPLY_SMTP_PASSWORD: ${REPLY_SMTP_PASSWORD:?set REPLY_SMTP_PASSWORD in .env}
     volumes:
       - ./config.toml:/etc/chimney-post/config.toml:ro
       # SQLite outbox + Matrix E2EE key store. Must persist: losing it drops

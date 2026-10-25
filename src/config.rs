@@ -742,6 +742,26 @@ mod tests {
     }
 
     #[test]
+    fn example_reply_section_validates_when_uncommented() {
+        // The [reply] example is shipped commented out; uncommented (and with
+        // its placeholders standing in for real credentials) it must be valid.
+        let text = include_str!("../config.example.toml");
+        let start = text.find("# [reply]").expect("example documents [reply]");
+        let uncommented: String = text[start..]
+            .lines()
+            .filter(|line| !line.starts_with("# #") && line.trim() != "#")
+            .map(|line| line.strip_prefix("# ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let full = format!("{}\n{uncommented}", &text[..start]);
+        let config: Config = toml::from_str(&full).expect("uncommented example must parse");
+        assert!(config.reply.enabled);
+        config
+            .validate()
+            .expect("uncommented example must validate");
+    }
+
+    #[test]
     fn example_config_documents_all_tunables() {
         // Guard against config keys drifting out of the documented example.
         let text = include_str!("../config.example.toml");
@@ -754,6 +774,13 @@ mod tests {
             "retry_backoff",
             "db_path",
             "max_len",
+            "allowed_senders",
+            "require_cross_signed_device",
+            "max_age_hours",
+            "max_body_len",
+            "max_per_hour",
+            "security",
+            "REPLY_SMTP_PASSWORD",
         ] {
             assert!(text.contains(key), "config.example.toml is missing `{key}`");
         }

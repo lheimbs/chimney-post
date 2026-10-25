@@ -35,10 +35,11 @@ This is essentially a super narrow version of [mailrise](https://github.com/YoRy
 - **End-to-end encrypted Matrix delivery** -- All messages are sent through E2EE. Optionally enforce that the target room is encrypted before sending.
 - **Password or access-token authentication** -- Connect to any Matrix homeserver with either method.
 - **MIME-aware body extraction** -- Multipart messages are walked and the `text/plain` part is forwarded, falling back to the HTML part reduced to text when a sender offers nothing else. Quoted-printable and base64 transfer encodings are decoded, as are RFC 2047 encoded-word subjects. Attachments are named at the end of the message and otherwise ignored -- they are never uploaded to Matrix.
-- **Configurable message templates** -- Format forwarded emails with MiniJinja templates (subject, body, sender, recipient are all available as variables).
+- **Configurable message templates** -- Format forwarded emails with MiniJinja templates (subject, body, sender, recipient and reply address are all available as variables).
 - **Durable, persistent queue** -- Accepted emails are written to a local SQLite outbox *before* the SMTP `250 OK` and only removed once delivered, so messages survive process restarts and crashes. Delivery is *at-least-once*: each send carries a stable Matrix transaction id so that an in-session retry after a lost response is deduplicated by the homeserver; a crash *between* a successful send and the queue removal will, however, redeliver on the next start as a genuine duplicate (the restart is a new session, so the transaction id no longer dedupes it). The outbox is size-bounded (`queue.max_len`); when full, new mail is refused with a temporary `451` so senders retry.
 - **Retry with exponential backoff** -- Failed Matrix deliveries are retried automatically (configurable attempts and interval). A single failing message backs off independently and never blocks delivery of the rest of the queue. A message that exhausts all retries is moved to a `dead_letter` table rather than dropped.
 - **Resilient startup** -- The SMTP server starts accepting and queuing mail immediately; the Matrix connection is established in the background and retried, so a homeserver outage at boot neither refuses incoming mail nor crash-loops the service. Queued mail is delivered once the connection is up.
+- **Optional answers from Matrix** -- Off by default. With `[reply]` enabled, replying `!reply <text>` to a forwarded email in Matrix sends `<text>` back by email to that email's sender. Only allowlisted users can do this, the reply must be end-to-end encrypted from a cross-signed device, and the format is strict. Mail goes out over TLS (or plain SMTP to a local MTA only), with rate limiting, retries and a dead-letter table. See [docs/replies.md](docs/replies.md).
 - **Async, low-resource** -- Built on Tokio; idles at minimal CPU and memory.
 - **Structured logging** -- JSON or human-readable log output via `tracing`.
 - **systemd-ready** -- Ships with a hardened service unit file.
@@ -305,9 +306,36 @@ Provide **either** the password **or** the access_token + device_id pair:
 | `db_path`       | `/var/lib/chimney-post/queue.db` | Path to the persistent SQLite outbox; must be writable by the service.   |
 | `max_len`       | `10000`                          | Max queued messages before new mail is refused with `451`. `0` = unlimited. |
 
+### `[reply]`
+
+Optional. It sends answers written in Matrix back by email. It is off unless
+`enabled = true`, and enabling it makes the keys below required. See
+[docs/replies.md](docs/replies.md) for the reply format and the security model.
+
+| Key                           | Default    | Description                                                                 |
+|-------------------------------|------------|-----------------------------------------------------------------------------|
+| `enabled`                     | `false`    | Turn answering from Matrix on.                                              |
+| `allowed_senders`             | --         | Matrix user ids whose answers are sent. Required; everyone else is ignored. |
+| `from`                        | --         | `From` address of the answers. Required.                                    |
+| `prefix`                      | `!reply`   | The word an answer must start with.                                         |
+| `require_cross_signed_device` | `true`     | Refuse answers from devices their owner has not cross-signed.              |
+| `max_age_hours`               | `168`      | How long after delivery an email can still be answered.                     |
+| `max_body_len`                | `4000`     | Longest answer accepted, in characters.                                     |
+| `max_per_hour`                | `20`       | Most answers accepted in any rolling hour.                                  |
+
+### `[reply.smtp]`
+
+| Key        | Default         | Description                                                                                       |
+|------------|-----------------|---------------------------------------------------------------------------------------------------|
+| `host`     | --              | SMTP server answers are submitted to. Required.                                                   |
+| `security` | `starttls`      | `starttls` or `tls` (certificate checked against the system trust store), or `none` -- loopback hosts only. |
+| `port`     | 587 / 465 / 25  | Defaults to the standard port for `security`.                                                     |
+| `username` | --              | Optional, together with `password`. Use `"${REPLY_SMTP_USERNAME}"` to read it from the environment. |
+| `password` | --              | Optional, together with `username`. Use `"${REPLY_SMTP_PASSWORD}"` to read it from the environment. |
+
 ## Message Templates
 
-Chimney Post formats each email using a [MiniJinja](https://docs.rs/minijinja) template before sending it to Matrix. Four variables are available: `from`, `to`, `subject`, and `body` (all strings).
+Chimney Post formats each email using a [MiniJinja](https://docs.rs/minijinja) template before sending it to Matrix. Five variables are available, all strings: `from`, `to`, `subject`, `body`, and `reply_to`. `reply_to` is the address an [answer from Matrix](docs/replies.md) would go to: the `Reply-To` header, else the `From` header.
 
 The built-in default template renders a full email view:
 
