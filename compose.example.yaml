@@ -18,8 +18,9 @@
 
 services:
   chimney-post:
-    # Pin a release (e.g. `:0.3.3`) instead of `:latest` if you want upgrades
-    # to happen only when you change this line.
+    # Pin a release (e.g. `:v0.3.3`) instead of `:latest` if you want upgrades
+    # to happen only when you change this line. To also verify the image's
+    # cosign signature on every `up`, add compose.verify.yaml (see that file).
     image: ghcr.io/lheimbs/chimney-post:latest
     container_name: chimney-post
     restart: unless-stopped

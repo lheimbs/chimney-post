@@ -1,0 +1,60 @@
+# Optional override for compose.example.yaml: run chimney-post pinned by
+# digest, and verify that digest's cosign signature before it starts.
+#
+#   docker pull ghcr.io/lheimbs/chimney-post:v0.3.3   # prints "Digest: sha256:..."
+#   echo 'CHIMNEY_DIGEST=sha256:...' >> .env
+#   echo 'COMPOSE_FILE=compose.yaml:compose.verify.yaml' >> .env
+#   docker compose up -d
+#
+# COMPOSE_FILE makes every plain `docker compose ...` use both files, so the
+# override can't be forgotten on the next `up`.
+#
+# Why a digest and not a tag: cosign checks what a reference points to in
+# the registry *now*, while Docker runs whatever it pulled earlier. For a tag
+# those can be two different images. A digest names exactly one image's
+# content, so the image verified here is the image that runs.
+# `CHIMNEY_DIGEST` is spliced in after `@`, so putting a tag there makes the
+# reference invalid instead of silently skipping that guarantee.
+#
+# To upgrade, repeat the `docker pull` with the new tag and replace
+# CHIMNEY_DIGEST. If GHCR or Sigstore is unreachable, `up` fails rather than
+# starting unverified. To start the already-verified container anyway, run
+# `docker compose up -d --no-deps chimney-post`.
+
+services:
+  chimney-post:
+    image: ghcr.io/lheimbs/chimney-post@${CHIMNEY_DIGEST:?set CHIMNEY_DIGEST in .env}
+    depends_on:
+      chimney-post-verify:
+        condition: service_completed_successfully
+
+  chimney-post-verify:
+    # cosign v3.1.4, itself pinned by digest: a verifier pulled by tag would
+    # be the weakest link. Its own signature checks out with:
+    #   cosign verify <this ref> \
+    #     --certificate-identity keyless@projectsigstore.iam.gserviceaccount.com \
+    #     --certificate-oidc-issuer https://accounts.google.com
+    image: ghcr.io/sigstore/cosign/cosign@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d
+    # The same identity the release notes verify against: a keyless
+    # signature from this repository's release workflow, run for a vX.Y.Z tag.
+    command:
+      - verify
+      - ghcr.io/lheimbs/chimney-post@${CHIMNEY_DIGEST:?set CHIMNEY_DIGEST in .env}
+      - --certificate-identity-regexp
+      - ^https://github\.com/lheimbs/chimney-post/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$$
+      - --certificate-oidc-issuer
+      - https://token.actions.githubusercontent.com
+      - --certificate-github-workflow-repository
+      - lheimbs/chimney-post
+    restart: "no"
+    # It needs outbound access to GHCR and Sigstore, but not to chimney-post,
+    # so it stays off the `chimney-post` network (compose puts it on the
+    # project's default network instead).
+    read_only: true
+    tmpfs:
+      # cosign caches Sigstore's TUF trust root under $HOME/.sigstore.
+      - /home/nonroot/.sigstore
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

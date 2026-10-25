@@ -14,3 +14,4 @@ config.toml
 # nothing enters the image because of this.
 chimney-post_banner.png
 compose.example.yaml
+compose.verify.yaml
