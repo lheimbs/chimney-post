@@ -6,12 +6,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
 
 /// A parsed email ready to be forwarded to Matrix.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Message {
     pub from: Option<String>,
     pub to: Vec<String>,
     pub subject: Option<String>,
     pub body: String,
+    /// The email's `Message-ID` header, so an answer sent from Matrix can
+    /// thread under it (`In-Reply-To`).
+    pub message_id: Option<String>,
+    /// Where an answer to this email goes: its `Reply-To` address, else its
+    /// `From` header address. `None` when neither header held an address.
+    pub reply_to: Option<String>,
 }
 
 /// A message as it lives in the persistent outbox, with its row id and the
@@ -49,6 +55,33 @@ CREATE TABLE IF NOT EXISTS dead_letter (
     last_error      TEXT NOT NULL
 );
 ";
+
+/// Schema changes applied on top of [`SCHEMA`], in order. `PRAGMA user_version`
+/// records how many have run, so each applies exactly once per database --
+/// `CREATE TABLE IF NOT EXISTS` alone cannot add a column to an existing table.
+/// Append only: never edit or reorder an entry that has shipped.
+const MIGRATIONS: &[&str] = &[
+    // 1: reply metadata, carried through the queue so a delivered email can
+    // later be answered from Matrix.
+    "ALTER TABLE outbox ADD COLUMN message_id TEXT;
+     ALTER TABLE outbox ADD COLUMN reply_to TEXT;
+     ALTER TABLE dead_letter ADD COLUMN message_id TEXT;
+     ALTER TABLE dead_letter ADD COLUMN reply_to TEXT;",
+];
+
+/// Apply every migration in [`MIGRATIONS`] the database has not seen yet, each
+/// in its own transaction together with the `user_version` bump.
+fn migrate(conn: &Connection) -> Result<()> {
+    let applied: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    for (index, migration) in MIGRATIONS.iter().enumerate().skip(applied as usize) {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(migration)?;
+        // PRAGMA takes no bound parameters; the value is a constant index.
+        tx.execute_batch(&format!("PRAGMA user_version = {}", index + 1))?;
+        tx.commit()?;
+    }
+    Ok(())
+}
 
 /// A durable, SQLite-backed message outbox.
 ///
@@ -88,6 +121,7 @@ impl MessageStore {
             }
             let conn = Connection::open(&path)?;
             conn.execute_batch(SCHEMA)?;
+            migrate(&conn)?;
             Ok(conn)
         })
         .await
@@ -114,6 +148,8 @@ impl MessageStore {
         let to = encode_recipients(&message.to);
         let subject = message.subject.clone();
         let body = message.body.clone();
+        let message_id = message.message_id.clone();
+        let reply_to = message.reply_to.clone();
         let created_at = unix_now();
         let max_len = self.max_len;
 
@@ -129,9 +165,10 @@ impl MessageStore {
                     }
                 }
                 conn.execute(
-                    "INSERT INTO outbox (from_addr, to_addrs, subject, body, attempts, next_attempt_at, created_at)
-                     VALUES (?1, ?2, ?3, ?4, 0, 0, ?5)",
-                    params![from, to, subject, body, created_at],
+                    "INSERT INTO outbox (from_addr, to_addrs, subject, body, message_id, reply_to,
+                                         attempts, next_attempt_at, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0, ?7)",
+                    params![from, to, subject, body, message_id, reply_to, created_at],
                 )?;
                 Ok(conn.last_insert_rowid())
             })
@@ -149,7 +186,7 @@ impl MessageStore {
         self.with_conn(move |conn| {
             let stored = conn
                 .query_row(
-                    "SELECT id, from_addr, to_addrs, subject, body, attempts
+                    "SELECT id, from_addr, to_addrs, subject, body, attempts, message_id, reply_to
                      FROM outbox
                      WHERE next_attempt_at <= ?1
                      ORDER BY next_attempt_at ASC, id ASC
@@ -180,8 +217,10 @@ impl MessageStore {
             let tx = conn.unchecked_transaction()?;
             tx.execute(
                 "INSERT INTO dead_letter
-                     (from_addr, to_addrs, subject, body, attempts, created_at, failed_at, last_error)
-                 SELECT from_addr, to_addrs, subject, body, attempts, created_at, ?2, ?3
+                     (from_addr, to_addrs, subject, body, message_id, reply_to,
+                      attempts, created_at, failed_at, last_error)
+                 SELECT from_addr, to_addrs, subject, body, message_id, reply_to,
+                        attempts, created_at, ?2, ?3
                  FROM outbox WHERE id = ?1",
                 params![id, failed_at, last_error],
             )?;
@@ -283,6 +322,8 @@ fn row_to_stored(row: &rusqlite::Row) -> rusqlite::Result<StoredMessage> {
             to: decode_recipients(&row.get::<_, String>(2)?),
             subject: row.get(3)?,
             body: row.get(4)?,
+            message_id: row.get(6)?,
+            reply_to: row.get(7)?,
         },
         attempts: attempts as u32,
     })
@@ -320,6 +361,8 @@ mod tests {
             to: to.iter().map(|s| s.to_string()).collect(),
             subject: Some("subj".to_string()),
             body: body.to_string(),
+            message_id: Some("<id@example.com>".to_string()),
+            reply_to: Some("sender@example.com".to_string()),
         }
     }
 
@@ -513,6 +556,38 @@ mod tests {
         // Operations must still succeed despite the poisoned mutex.
         assert_eq!(store.len().await.unwrap(), 1);
         store.enqueue(&msg("after", &["x@x.com"])).await.unwrap();
+        assert_eq!(store.len().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn migrates_a_database_created_before_reply_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.db");
+
+        // A queue.db exactly as the previous release left it: base schema,
+        // user_version 0, and a message still waiting for delivery.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute(
+                "INSERT INTO outbox (from_addr, to_addrs, subject, body, created_at)
+                 VALUES ('old@example.com', 'a@x.com', 'subj', 'queued before upgrade', 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let store = MessageStore::open(path.to_str().unwrap()).await.unwrap();
+        let claimed = store.claim_next_ready(unix_now()).await.unwrap().unwrap();
+        assert_eq!(claimed.message.body, "queued before upgrade");
+        assert_eq!(claimed.message.message_id, None);
+        assert_eq!(claimed.message.reply_to, None);
+
+        // New messages carry the metadata, and reopening does not re-run the
+        // migration (which would fail on the duplicate column).
+        store.enqueue(&msg("new", &["a@x.com"])).await.unwrap();
+        drop(store);
+        let store = MessageStore::open(path.to_str().unwrap()).await.unwrap();
         assert_eq!(store.len().await.unwrap(), 2);
     }
 

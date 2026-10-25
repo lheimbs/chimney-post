@@ -19,6 +19,7 @@ pub fn parse_data(from: Option<String>, to: Vec<String>, data: &str) -> Message 
         Some(parsed) => (parsed.subject, parsed.body),
         None => extract_subject_and_body(data),
     };
+    let (message_id, reply_to) = mime::reply_headers(data);
     let from = from.filter(|addr| !addr.is_empty());
 
     Message {
@@ -26,6 +27,8 @@ pub fn parse_data(from: Option<String>, to: Vec<String>, data: &str) -> Message 
         to,
         subject,
         body,
+        message_id,
+        reply_to,
     }
 }
 

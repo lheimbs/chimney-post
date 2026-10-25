@@ -297,6 +297,7 @@ impl Config {
                 to => "recipient@example.com",
                 subject => "Test Subject",
                 body => "Test body",
+                reply_to => "test@example.com",
             };
             tmpl.render(test_ctx).map_err(|error| {
                 ChimneyError::Config(format!(

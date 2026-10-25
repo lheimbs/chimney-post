@@ -129,6 +129,7 @@ mod tests {
             to: to.iter().map(|s| s.to_string()).collect(),
             subject: None,
             body: String::new(),
+            ..Default::default()
         }
     }
 

@@ -19,6 +19,7 @@ pub fn format_message(message: &Message, template_str: &str) -> Result<String> {
         to => to_joined,
         subject => message.subject.as_deref().unwrap_or(""),
         body => &message.body,
+        reply_to => message.reply_to.as_deref().unwrap_or(""),
     };
 
     tmpl.render(ctx)
@@ -37,6 +38,7 @@ mod tests {
             to: vec!["bob@example.com".to_string()],
             subject: Some("Hello".to_string()),
             body: "Hi Bob!".to_string(),
+            ..Default::default()
         };
 
         let result = format_message(&message, DEFAULT_MESSAGE_TEMPLATE).unwrap();
@@ -53,6 +55,7 @@ mod tests {
             to: Vec::new(),
             subject: None,
             body: "".to_string(),
+            ..Default::default()
         };
 
         let result = format_message(&message, DEFAULT_MESSAGE_TEMPLATE).unwrap();
@@ -69,6 +72,7 @@ mod tests {
             to: vec!["rcpt@test.com".to_string()],
             subject: Some("Alert".to_string()),
             body: "Server is down".to_string(),
+            ..Default::default()
         };
 
         let result = format_message(&message, template).unwrap();
@@ -83,6 +87,7 @@ mod tests {
             to: vec![],
             subject: None,
             body: "test".to_string(),
+            ..Default::default()
         };
 
         let result = format_message(&message, template);
@@ -98,9 +103,24 @@ mod tests {
             to: vec!["a@example.com".to_string(), "b@example.com".to_string()],
             subject: None,
             body: "test".to_string(),
+            ..Default::default()
         };
 
         let result = format_message(&message, template).unwrap();
         assert_eq!(result, "To: a@example.com, b@example.com");
+    }
+
+    #[test]
+    fn template_can_show_the_reply_address() {
+        let template = "{% if reply_to %}reply goes to {{ reply_to }}{% endif %}";
+        let message = Message {
+            reply_to: Some("support@example.com".to_string()),
+            ..Default::default()
+        };
+        let result = format_message(&message, template).unwrap();
+        assert_eq!(result, "reply goes to support@example.com");
+
+        let message = Message::default();
+        assert_eq!(format_message(&message, template).unwrap(), "");
     }
 }

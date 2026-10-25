@@ -322,6 +322,7 @@ mod tests {
             to: vec!["r@y.com".into()],
             subject: Some("s".into()),
             body: body.into(),
+            ..Default::default()
         }
     }
 

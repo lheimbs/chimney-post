@@ -29,9 +29,11 @@ store_path = "/var/lib/chimney-post/matrix-store"
 # require_e2ee = true
 
 # MiniJinja template for formatting messages sent to Matrix.
-# Available variables: from, to, subject, body
-# All variables are strings; from and subject are empty when not present in
-# the email, so use {% if from %} to conditionally include them.
+# Available variables: from, to, subject, body, reply_to
+# All variables are strings; from, subject and reply_to are empty when not
+# present in the email, so use {% if from %} to conditionally include them.
+# reply_to is where an email reply would go (the Reply-To header, else the
+# From header) -- see [reply] below.
 # If omitted, the built-in default template is used (shows From/To/Subject
 # headers followed by the body).
 # See https://docs.rs/minijinja for full template syntax.

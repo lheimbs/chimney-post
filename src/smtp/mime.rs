@@ -13,7 +13,7 @@
 //! omits "there was a PDF here" is worse than one that says so, but uploading
 //! attachments to Matrix is a different feature.
 
-use mailparse::{DispositionType, MailHeaderMap, ParsedMail};
+use mailparse::{DispositionType, MailAddr, MailHeader, MailHeaderMap, ParsedMail};
 
 /// The subject and body recovered from a MIME message.
 pub(super) struct MimeMessage {
@@ -64,6 +64,60 @@ pub(super) fn parse(data: &str) -> Option<MimeMessage> {
     }
 
     Some(MimeMessage { subject, body })
+}
+
+/// The headers needed to answer `data` by email: its `Message-ID`, and the
+/// address a reply goes to -- `Reply-To` if it holds an address, else `From`.
+///
+/// Parsed separately from [`parse`] so that a message whose *body* defeats
+/// MIME parsing can still be answered. A value that does not look like a
+/// single, well-formed message id or address is dropped rather than kept: both
+/// end up in the headers of an outgoing email, so anything doubtful is refused
+/// here instead of being sanitised later.
+pub(super) fn reply_headers(data: &str) -> (Option<String>, Option<String>) {
+    let Ok((headers, _)) = mailparse::parse_headers(data.as_bytes()) else {
+        return (None, None);
+    };
+
+    let message_id = headers
+        .get_first_value("Message-ID")
+        .and_then(|value| clean_message_id(&value));
+    let reply_to = ["Reply-To", "From"]
+        .iter()
+        .find_map(|name| headers.get_first_header(name).and_then(first_address));
+
+    (message_id, reply_to)
+}
+
+/// `value` trimmed, if it is one `<id>` with no whitespace or control
+/// characters inside and fits on a header line.
+fn clean_message_id(value: &str) -> Option<String> {
+    let value = value.trim();
+    let inner = value.strip_prefix('<')?.strip_suffix('>')?;
+    let well_formed = !inner.is_empty()
+        && value.len() <= 998
+        && inner.contains('@')
+        && !inner
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '<' | '>'));
+    well_formed.then(|| value.to_string())
+}
+
+/// The first mailbox address in an address-list header, if it is plausible as
+/// an addr-spec. Groups are searched too (`undisclosed: a@b;`).
+fn first_address(header: &MailHeader) -> Option<String> {
+    let list = mailparse::addrparse_header(header).ok()?;
+    let addr = list.iter().find_map(|entry| match entry {
+        MailAddr::Single(single) => Some(single.addr.clone()),
+        MailAddr::Group(group) => group.addrs.first().map(|single| single.addr.clone()),
+    })?;
+    let plausible = addr.len() <= 254
+        && addr.split('@').count() == 2
+        && addr.split('@').all(|part| !part.is_empty())
+        && !addr.chars().any(|c| {
+            c.is_whitespace() || c.is_control() || matches!(c, '<' | '>' | ',' | ';' | '"')
+        });
+    plausible.then_some(addr)
 }
 
 /// Find the first leaf part of type `want`, depth-first.
@@ -307,7 +361,7 @@ fn collapse_spaces(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{html_to_text, parse};
+    use super::{html_to_text, parse, reply_headers};
 
     /// A cut-down but structurally faithful copy of the mail Nextcloud sends
     /// from Settings -> Basic settings -> "Send email": multipart/alternative,
@@ -570,5 +624,47 @@ mod tests {
         );
 
         assert_eq!(html_to_text(html), "real text");
+    }
+
+    #[test]
+    fn reply_headers_prefer_reply_to_over_from() {
+        let data = concat!(
+            "From: Nextcloud <nextcloud@cloud.example.com>\r\n",
+            "Reply-To: \"Support\" <support@example.com>\r\n",
+            "Message-ID: <abc.123@cloud.example.com>\r\n",
+            "\r\n",
+            "body\r\n",
+        );
+        let (message_id, reply_to) = reply_headers(data);
+        assert_eq!(message_id.as_deref(), Some("<abc.123@cloud.example.com>"));
+        assert_eq!(reply_to.as_deref(), Some("support@example.com"));
+    }
+
+    #[test]
+    fn reply_headers_fall_back_to_from() {
+        let data = "From: root@host.example.com (Cron Daemon)\r\n\r\nbody";
+        let (message_id, reply_to) = reply_headers(data);
+        assert_eq!(message_id, None);
+        assert_eq!(reply_to.as_deref(), Some("root@host.example.com"));
+    }
+
+    #[test]
+    fn reply_headers_fall_back_to_from_when_reply_to_is_unusable() {
+        let data = "Reply-To: not an address\r\nFrom: a@example.com\r\n\r\nbody";
+        assert_eq!(reply_headers(data).1.as_deref(), Some("a@example.com"));
+    }
+
+    #[test]
+    fn reply_headers_reject_malformed_values() {
+        for (header, value) in [
+            ("Message-ID", "no-angle-brackets@example.com"),
+            ("Message-ID", "<two words@example.com>"),
+            ("Message-ID", "<>"),
+            ("From", "bare-local-part"),
+            ("From", "a@b@c"),
+        ] {
+            let data = format!("{header}: {value}\r\n\r\nbody");
+            assert_eq!(reply_headers(&data), (None, None), "{header}: {value}");
+        }
     }
 }
