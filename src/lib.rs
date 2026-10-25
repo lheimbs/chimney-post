@@ -2,6 +2,7 @@ pub mod config;
 pub mod error;
 pub mod matrix;
 pub mod queue;
+pub mod reply;
 pub mod smtp;
 
 pub use config::Config;
