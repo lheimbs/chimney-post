@@ -110,40 +110,44 @@ DL_BASE="https://github.com/${REPO}/releases/download/${VERSION}"
 # for those, check up front instead of installing a binary that can't run.
 # A ranged GET rather than HEAD: the asset URL redirects to a signed storage
 # URL that is only valid for the method it was issued for.
-TARGET="${ARCH}-unknown-linux-musl"
-probe_code=$(curl -sSL -r 0-0 -o /dev/null -w '%{http_code}' \
-  "$DL_BASE/chimney-post-${VERSION}-${TARGET}.tar.gz") \
-  || err "could not reach github.com to look up the ${VERSION} release assets"
-case "$probe_code" in
-  200|206) ;;
-  404)
-    TARGET="${ARCH}-unknown-linux-gnu"
-    if [ "$SKIP_GLIBC_CHECK" = "1" ]; then
-      warn "CHIMNEY_SKIP_GLIBC_CHECK=1 -- not checking glibc. ${VERSION} only has glibc builds and will not start on a host with an older glibc."
-    else
-      # What the glibc builds of the older releases were linked against.
-      MIN_GLIBC="2.38"
-      # Captured first, not piped: under `set -o pipefail`, `head`/`grep -q`
-      # closing the pipe early gives ldd a SIGPIPE and fails the whole pipeline.
-      ldd_out=$(ldd --version 2>&1 || true)
-      ldd_first=${ldd_out%%$'\n'*}
-      host_glibc=""
-      case "$ldd_first" in
-        *[Gg][Ll][Ii][Bb][Cc]*|*"GNU libc"*) host_glibc=$(printf '%s\n' "$ldd_first" | grep -oE '[0-9]+\.[0-9]+$' || true) ;;
-      esac
-      if [ -z "$host_glibc" ]; then
-        err "${VERSION} only has glibc builds, and this system's glibc version could not be determined (musl-based distro?). Install a newer release, or build from source (see README)."
+resolve_target() {
+  local probe_code ldd_out ldd_first host_glibc lowest_glibc
+  TARGET="${ARCH}-unknown-linux-musl"
+  probe_code=$(curl -sSL -r 0-0 -o /dev/null -w '%{http_code}' \
+    "$DL_BASE/chimney-post-${VERSION}-${TARGET}.tar.gz") \
+    || err "could not reach github.com to look up the ${VERSION} release assets"
+  case "$probe_code" in
+    200|206) ;;
+    404)
+      TARGET="${ARCH}-unknown-linux-gnu"
+      if [ "$SKIP_GLIBC_CHECK" = "1" ]; then
+        warn "CHIMNEY_SKIP_GLIBC_CHECK=1 -- not checking glibc. ${VERSION} only has glibc builds and will not start on a host with an older glibc."
+      else
+        # What the glibc builds of the older releases were linked against.
+        MIN_GLIBC="2.38"
+        # Captured first, not piped: under `set -o pipefail`, `head`/`grep -q`
+        # closing the pipe early gives ldd a SIGPIPE and fails the whole pipeline.
+        ldd_out=$(ldd --version 2>&1 || true)
+        ldd_first=${ldd_out%%$'\n'*}
+        host_glibc=""
+        case "$ldd_first" in
+          *[Gg][Ll][Ii][Bb][Cc]*|*"GNU libc"*) host_glibc=$(printf '%s\n' "$ldd_first" | grep -oE '[0-9]+\.[0-9]+$' || true) ;;
+        esac
+        if [ -z "$host_glibc" ]; then
+          err "${VERSION} only has glibc builds, and this system's glibc version could not be determined (musl-based distro?). Install a newer release, or build from source (see README)."
+        fi
+        lowest_glibc=$(printf '%s\n%s\n' "$MIN_GLIBC" "$host_glibc" | sort -V)
+        lowest_glibc=${lowest_glibc%%$'\n'*}
+        if [ "$lowest_glibc" != "$MIN_GLIBC" ]; then
+          err "${VERSION} only has glibc builds, which need glibc ${MIN_GLIBC} or newer; this system has ${host_glibc}. Install a newer release (they are statically linked), or build from source (see README)."
+        fi
       fi
-      lowest_glibc=$(printf '%s\n%s\n' "$MIN_GLIBC" "$host_glibc" | sort -V)
-      lowest_glibc=${lowest_glibc%%$'\n'*}
-      if [ "$lowest_glibc" != "$MIN_GLIBC" ]; then
-        err "${VERSION} only has glibc builds, which need glibc ${MIN_GLIBC} or newer; this system has ${host_glibc}. Install a newer release (they are statically linked), or build from source (see README)."
-      fi
-    fi
-    ;;
-  *) err "unexpected HTTP ${probe_code} looking up ${VERSION} release assets for ${TARGET}" ;;
-esac
-log "Installing chimney-post ${VERSION} (${TARGET})"
+      ;;
+    *) err "unexpected HTTP ${probe_code} looking up ${VERSION} release assets for ${TARGET}" ;;
+  esac
+  log "Installing chimney-post ${VERSION} (${TARGET})"
+}
+resolve_target
 
 # A local WORKDIR (not TMPDIR) so this never shadows the environment
 # variable of that name mktemp/tar/etc. themselves consult. Verified non-empty
@@ -155,111 +159,114 @@ if [ -z "$WORKDIR" ] || [ ! -d "$WORKDIR" ]; then
 fi
 trap 'if [ -n "${WORKDIR:-}" ] && [ -d "$WORKDIR" ]; then rm -rf -- "$WORKDIR"; fi' EXIT
 
-TARBALL="chimney-post-${VERSION}-${TARGET}.tar.gz"
-
 fetch() {
   # $1 = URL, $2 = destination filename in $WORKDIR
   curl -fsSL "$1" -o "$WORKDIR/$2" || err "failed to download $1"
 }
 
-log "Downloading release assets..."
-fetch "$DL_BASE/$TARBALL" "$TARBALL"
-fetch "$DL_BASE/$TARBALL.bundle" "$TARBALL.bundle"
-fetch "$DL_BASE/SHA256SUMS" "SHA256SUMS"
-
-log "Verifying checksum..."
-( cd "$WORKDIR" && sha256sum -c SHA256SUMS --ignore-missing ) \
-  || err "checksum verification failed -- downloaded file does not match SHA256SUMS"
-
-if [ "$SKIP_VERIFY" = "1" ]; then
-  warn "CHIMNEY_SKIP_VERIFY=1 -- skipping cosign signature verification. Only the checksum was checked, which proves the download wasn't corrupted, NOT that it came from the real release workflow."
-elif command -v cosign >/dev/null 2>&1; then
-  log "Verifying cosign signature..."
-  cosign verify-blob "$WORKDIR/$TARBALL" \
-    --bundle "$WORKDIR/$TARBALL.bundle" \
-    --certificate-identity "https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/${VERSION}" \
-    --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-    --certificate-github-workflow-repository "${REPO}" \
-    || err "cosign signature verification failed -- refusing to install a tarball that doesn't verify against ${REPO}'s release workflow"
-else
-  err "cosign is required to verify the release signature but was not found. Install it from https://docs.sigstore.dev/cosign/system_config/installation/ and re-run, or set CHIMNEY_SKIP_VERIFY=1 to install with checksum-only verification (not recommended)."
-fi
-
-log "Installing binary to ${INSTALL_PREFIX}/chimney-post..."
-tar -xzf "$WORKDIR/$TARBALL" -C "$WORKDIR" chimney-post
-$SUDO install -d -m 0755 "$INSTALL_PREFIX"
-$SUDO install -m 0755 -o root -g root "$WORKDIR/chimney-post" "$INSTALL_PREFIX/chimney-post"
-
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/${VERSION}"
 
-# $CONFIG_DIR is root-owned, so an existing config.toml is only checked
-# for/written to via $SUDO -- a plain `[ -e ]` as a non-root user would still
-# work (0755 dirs are traversable/readable by anyone), but $SUDO keeps this
-# correct even if the directory's permissions are tightened. Config.toml is
-# needed regardless of init system, so this runs even under
-# CHIMNEY_SKIP_SYSTEMD=1 -- that flag only controls the systemd unit below.
-$SUDO install -d -m 0755 "$CONFIG_DIR"
+install_systemd() {
+  TARBALL="chimney-post-${VERSION}-${TARGET}.tar.gz"
 
-if $SUDO test -e "$CONFIG_DIR/config.toml"; then
-  log "Leaving existing $CONFIG_DIR/config.toml in place."
-else
-  log "Writing template config to ${CONFIG_DIR}/config.toml..."
-  fetch_config_url="$RAW_BASE/config.example.toml"
-  curl -fsSL "$fetch_config_url" -o "$WORKDIR/config.toml" \
-    || err "failed to download $fetch_config_url"
-  $SUDO install -m 0600 "$WORKDIR/config.toml" "$CONFIG_DIR/config.toml"
-fi
+  log "Downloading release assets..."
+  fetch "$DL_BASE/$TARBALL" "$TARBALL"
+  fetch "$DL_BASE/$TARBALL.bundle" "$TARBALL.bundle"
+  fetch "$DL_BASE/SHA256SUMS" "SHA256SUMS"
 
-if [ "$SKIP_SYSTEMD" = "1" ]; then
-  log "CHIMNEY_SKIP_SYSTEMD=1 -- skipping systemd unit installation."
-elif command -v systemctl >/dev/null 2>&1; then
-  log "Installing systemd unit..."
-  curl -fsSL "$RAW_BASE/systemd/chimney-post.service" -o "$WORKDIR/chimney-post.service" \
-    || err "failed to download $RAW_BASE/systemd/chimney-post.service"
-  # The unit hardcodes both /usr/local/bin and /etc/chimney-post; keep each in
-  # sync if the binary or the config went somewhere else. Every rewrite is
-  # checked afterwards rather than trusted: sed reports success when it matched
-  # nothing, and silently installing a unit that still points at the default
-  # paths would fail later, at `systemctl start`, with a much worse error.
-  if [ "$INSTALL_PREFIX" != "/usr/local/bin" ]; then
-    sed -i "s|^ExecStart=/usr/local/bin/chimney-post|ExecStart=${INSTALL_PREFIX}/chimney-post|" \
-      "$WORKDIR/chimney-post.service"
-    grep -qF "ExecStart=${INSTALL_PREFIX}/chimney-post" "$WORKDIR/chimney-post.service" \
-      || err "could not point the unit's ExecStart at ${INSTALL_PREFIX} -- install /etc/systemd/system/chimney-post.service by hand (see README)"
-  fi
-  if [ "$CONFIG_DIR" != "/etc/chimney-post" ]; then
-    # Two spellings, because install.sh is fetched from main but the unit from
-    # the release tag: current units pass the config as a systemd credential,
-    # units from releases before that set CHIMNEY_CONFIG directly.
-    sed -i \
-      -e "s|^LoadCredential=config:/etc/chimney-post/config.toml|LoadCredential=config:${CONFIG_DIR}/config.toml|" \
-      -e "s|^Environment=CHIMNEY_CONFIG=/etc/chimney-post/config.toml|Environment=CHIMNEY_CONFIG=${CONFIG_DIR}/config.toml|" \
-      "$WORKDIR/chimney-post.service"
-    if ! grep -qF "LoadCredential=config:${CONFIG_DIR}/config.toml" "$WORKDIR/chimney-post.service" \
-       && ! grep -qF "Environment=CHIMNEY_CONFIG=${CONFIG_DIR}/config.toml" "$WORKDIR/chimney-post.service"; then
-      err "could not point the unit at ${CONFIG_DIR}/config.toml -- install /etc/systemd/system/chimney-post.service by hand (see README)"
-    fi
-  fi
-  $SUDO install -m 0644 "$WORKDIR/chimney-post.service" /etc/systemd/system/chimney-post.service
-  # The unit file is worth installing wherever systemctl exists -- including
-  # container images being built to run systemd later -- but the reload is only
-  # meaningful when systemd is the running init. WSL without systemd enabled,
-  # LXC/chroots and many container images ship the binaries without PID 1, and
-  # there `daemon-reload` fails with "System has not been booted with systemd";
-  # under `set -e` that aborted the installer after everything was already in
-  # place, swallowing the "Next steps" block. /run/systemd/system exists only
-  # when systemd really is init, so gate on it -- and warn rather than exit if
-  # the reload fails anyway.
-  if [ -d /run/systemd/system ]; then
-    $SUDO systemctl daemon-reload \
-      || warn "systemctl daemon-reload failed -- run it yourself before starting the service"
+  log "Verifying checksum..."
+  ( cd "$WORKDIR" && sha256sum -c SHA256SUMS --ignore-missing ) \
+    || err "checksum verification failed -- downloaded file does not match SHA256SUMS"
+
+  if [ "$SKIP_VERIFY" = "1" ]; then
+    warn "CHIMNEY_SKIP_VERIFY=1 -- skipping cosign signature verification. Only the checksum was checked, which proves the download wasn't corrupted, NOT that it came from the real release workflow."
+  elif command -v cosign >/dev/null 2>&1; then
+    log "Verifying cosign signature..."
+    cosign verify-blob "$WORKDIR/$TARBALL" \
+      --bundle "$WORKDIR/$TARBALL.bundle" \
+      --certificate-identity "https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/${VERSION}" \
+      --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+      --certificate-github-workflow-repository "${REPO}" \
+      || err "cosign signature verification failed -- refusing to install a tarball that doesn't verify against ${REPO}'s release workflow"
   else
-    warn "systemd is not the running init here -- unit installed, but not reloaded. Run 'systemctl daemon-reload' once you boot with systemd."
+    err "cosign is required to verify the release signature but was not found. Install it from https://docs.sigstore.dev/cosign/system_config/installation/ and re-run, or set CHIMNEY_SKIP_VERIFY=1 to install with checksum-only verification (not recommended)."
   fi
-  log "Service unit installed (not started -- fill in ${CONFIG_DIR}/config.toml first, see 'Next steps' below)."
-else
-  warn "systemctl not found -- skipping systemd unit installation."
-fi
+
+  log "Installing binary to ${INSTALL_PREFIX}/chimney-post..."
+  tar -xzf "$WORKDIR/$TARBALL" -C "$WORKDIR" chimney-post
+  $SUDO install -d -m 0755 "$INSTALL_PREFIX"
+  $SUDO install -m 0755 -o root -g root "$WORKDIR/chimney-post" "$INSTALL_PREFIX/chimney-post"
+
+  # $CONFIG_DIR is root-owned, so an existing config.toml is only checked
+  # for/written to via $SUDO -- a plain `[ -e ]` as a non-root user would still
+  # work (0755 dirs are traversable/readable by anyone), but $SUDO keeps this
+  # correct even if the directory's permissions are tightened. Config.toml is
+  # needed regardless of init system, so this runs even under
+  # CHIMNEY_SKIP_SYSTEMD=1 -- that flag only controls the systemd unit below.
+  $SUDO install -d -m 0755 "$CONFIG_DIR"
+
+  if $SUDO test -e "$CONFIG_DIR/config.toml"; then
+    log "Leaving existing $CONFIG_DIR/config.toml in place."
+  else
+    log "Writing template config to ${CONFIG_DIR}/config.toml..."
+    fetch_config_url="$RAW_BASE/config.example.toml"
+    curl -fsSL "$fetch_config_url" -o "$WORKDIR/config.toml" \
+      || err "failed to download $fetch_config_url"
+    $SUDO install -m 0600 "$WORKDIR/config.toml" "$CONFIG_DIR/config.toml"
+  fi
+
+  if [ "$SKIP_SYSTEMD" = "1" ]; then
+    log "CHIMNEY_SKIP_SYSTEMD=1 -- skipping systemd unit installation."
+  elif command -v systemctl >/dev/null 2>&1; then
+    log "Installing systemd unit..."
+    curl -fsSL "$RAW_BASE/systemd/chimney-post.service" -o "$WORKDIR/chimney-post.service" \
+      || err "failed to download $RAW_BASE/systemd/chimney-post.service"
+    # The unit hardcodes both /usr/local/bin and /etc/chimney-post; keep each in
+    # sync if the binary or the config went somewhere else. Every rewrite is
+    # checked afterwards rather than trusted: sed reports success when it matched
+    # nothing, and silently installing a unit that still points at the default
+    # paths would fail later, at `systemctl start`, with a much worse error.
+    if [ "$INSTALL_PREFIX" != "/usr/local/bin" ]; then
+      sed -i "s|^ExecStart=/usr/local/bin/chimney-post|ExecStart=${INSTALL_PREFIX}/chimney-post|" \
+        "$WORKDIR/chimney-post.service"
+      grep -qF "ExecStart=${INSTALL_PREFIX}/chimney-post" "$WORKDIR/chimney-post.service" \
+        || err "could not point the unit's ExecStart at ${INSTALL_PREFIX} -- install /etc/systemd/system/chimney-post.service by hand (see README)"
+    fi
+    if [ "$CONFIG_DIR" != "/etc/chimney-post" ]; then
+      # Two spellings, because install.sh is fetched from main but the unit from
+      # the release tag: current units pass the config as a systemd credential,
+      # units from releases before that set CHIMNEY_CONFIG directly.
+      sed -i \
+        -e "s|^LoadCredential=config:/etc/chimney-post/config.toml|LoadCredential=config:${CONFIG_DIR}/config.toml|" \
+        -e "s|^Environment=CHIMNEY_CONFIG=/etc/chimney-post/config.toml|Environment=CHIMNEY_CONFIG=${CONFIG_DIR}/config.toml|" \
+        "$WORKDIR/chimney-post.service"
+      if ! grep -qF "LoadCredential=config:${CONFIG_DIR}/config.toml" "$WORKDIR/chimney-post.service" \
+         && ! grep -qF "Environment=CHIMNEY_CONFIG=${CONFIG_DIR}/config.toml" "$WORKDIR/chimney-post.service"; then
+        err "could not point the unit at ${CONFIG_DIR}/config.toml -- install /etc/systemd/system/chimney-post.service by hand (see README)"
+      fi
+    fi
+    $SUDO install -m 0644 "$WORKDIR/chimney-post.service" /etc/systemd/system/chimney-post.service
+    # The unit file is worth installing wherever systemctl exists -- including
+    # container images being built to run systemd later -- but the reload is only
+    # meaningful when systemd is the running init. WSL without systemd enabled,
+    # LXC/chroots and many container images ship the binaries without PID 1, and
+    # there `daemon-reload` fails with "System has not been booted with systemd";
+    # under `set -e` that aborted the installer after everything was already in
+    # place, swallowing the "Next steps" block. /run/systemd/system exists only
+    # when systemd really is init, so gate on it -- and warn rather than exit if
+    # the reload fails anyway.
+    if [ -d /run/systemd/system ]; then
+      $SUDO systemctl daemon-reload \
+        || warn "systemctl daemon-reload failed -- run it yourself before starting the service"
+    else
+      warn "systemd is not the running init here -- unit installed, but not reloaded. Run 'systemctl daemon-reload' once you boot with systemd."
+    fi
+    log "Service unit installed (not started -- fill in ${CONFIG_DIR}/config.toml first, see 'Next steps' below)."
+  else
+    warn "systemctl not found -- skipping systemd unit installation."
+  fi
+}
+install_systemd
 
 # --- Optional MTA setup (msmtp) ---------------------------------------------
 # Package names/behavior below are each verified against the real repos (not
