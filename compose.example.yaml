@@ -1,0 +1,80 @@
+# Sample Docker Compose setup for chimney-post.
+#
+#   cp compose.example.yaml compose.yaml
+#   cp config.example.toml config.toml     # then set bind = "0.0.0.0:2525"
+#   echo 'MATRIX_PASSWORD=your-secret' > .env && chmod 600 .env
+#   docker compose up -d
+#
+# This is the compose equivalent of the `docker run` command in the README's
+# "Running with Docker" section -- read that section for why each setting
+# below matters. In short:
+#
+# - config.toml must set `bind = "0.0.0.0:2525"` (the container's own
+#   127.0.0.1 is unreachable from outside it) and be readable by uid 65532.
+# - Reachability is limited by the published port (host loopback only) and
+#   the dedicated `chimney-post` network, not by the bind address. The SMTP
+#   listener has no authentication: anything that can reach it can send
+#   Matrix messages.
+
+services:
+  chimney-post:
+    # Pin a release (e.g. `:0.3.3`) instead of `:latest` if you want upgrades
+    # to happen only when you change this line.
+    image: ghcr.io/lheimbs/chimney-post:latest
+    container_name: chimney-post
+    restart: unless-stopped
+    # The service spends up to 30s draining the outbox on SIGTERM; compose's
+    # default is 10s, after which it SIGKILLs mid-delivery. Matches the
+    # systemd unit's TimeoutStopSec=45.
+    stop_grace_period: 45s
+    environment:
+      # Read from the shell or from a `.env` file next to compose.yaml, and
+      # substituted into the `${MATRIX_PASSWORD}` placeholder in config.toml.
+      # Never put the secret in config.toml or in this file.
+      MATRIX_PASSWORD: ${MATRIX_PASSWORD:?set MATRIX_PASSWORD in .env}
+      # Using an access token instead? Replace the line above with:
+      # MATRIX_ACCESS_TOKEN: ${MATRIX_ACCESS_TOKEN:?set MATRIX_ACCESS_TOKEN in .env}
+    volumes:
+      - ./config.toml:/etc/chimney-post/config.toml:ro
+      # SQLite outbox + Matrix E2EE key store. Must persist: losing it drops
+      # queued mail and the bot's encryption identity.
+      - chimney-post-data:/var/lib/chimney-post
+    ports:
+      # Host processes (cron, apticron, msmtp, ...) reach it at
+      # 127.0.0.1:2525. Keep the `127.0.0.1:` prefix -- a bare "2525:2525"
+      # publishes on every host interface and bypasses ufw/firewalld.
+      - "127.0.0.1:2525:2525"
+    networks:
+      - chimney-post
+    # Hardening. The image is distroless and already runs as non-root; the
+    # only path it writes to is the data volume above.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  # Another container that should send mail joins the same network and uses
+  # `chimney-post:2525` as its SMTP server. Attaching a container to this
+  # network grants it unauthenticated send access -- only add what needs it.
+  #
+  # nextcloud:
+  #   image: nextcloud
+  #   networks:
+  #     - chimney-post
+  #   environment:
+  #     SMTP_HOST: chimney-post
+  #     SMTP_PORT: "2525"
+
+networks:
+  chimney-post:
+    # A fixed name (instead of compose's `<project>_chimney-post`) so
+    # containers from *other* compose projects can join it with:
+    #
+    #   networks:
+    #     chimney-post:
+    #       external: true
+    name: chimney-post
+
+volumes:
+  chimney-post-data:
