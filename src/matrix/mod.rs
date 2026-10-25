@@ -1,5 +1,6 @@
 mod client;
 mod formatter;
+mod replies;
 mod routing;
 
 pub use client::MatrixClient;

@@ -2,6 +2,7 @@ use chimney_post::config::Config;
 use chimney_post::error::{ChimneyError, Result};
 use chimney_post::matrix::MatrixClient;
 use chimney_post::queue::{run_with_reconnect, MessageStore};
+use chimney_post::reply::{ReplyWorker, ReplyWorkerConfig, SmtpTransport};
 use chimney_post::smtp::{bind_smtp, serve_smtp};
 use sd_notify::NotifyState;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,6 +38,19 @@ async fn main() -> Result<()> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+    // Built before SMTP binds, so an unusable [reply] setup fails startup
+    // instead of surfacing later in a background task.
+    let replies = if config.reply.enabled {
+        let transport = SmtpTransport::from_config(&config.reply.smtp)?;
+        let worker_config = ReplyWorkerConfig::from_config(&config)?;
+        Some((transport, worker_config))
+    } else {
+        None
+    };
+    // The connected Matrix client, published for the reply tasks once the
+    // background connect succeeds.
+    let (client_tx, client_rx) = watch::channel::<Option<MatrixClient>>(None);
+
     // Bind SMTP first: once it's listening the service can accept and queue mail,
     // which is the real readiness point -- so a homeserver outage at boot neither
     // refuses mail nor crash-loops the service. Signal systemd ready here, before
@@ -59,14 +73,19 @@ async fn main() -> Result<()> {
     let worker_store = store.clone();
     let worker_connected = Arc::clone(&connected);
     let worker_shutdown = shutdown_rx.clone();
+    let connect_store = store.clone();
+    let client_tx = Arc::new(client_tx);
     let mut worker_handle = tokio::spawn(async move {
         let connect_config = Arc::clone(&worker_config);
         let connect = move || {
             let cfg = Arc::clone(&connect_config);
             let connected = Arc::clone(&worker_connected);
+            let store = connect_store.clone();
+            let client_tx = Arc::clone(&client_tx);
             async move {
-                let client = MatrixClient::connect(cfg.as_ref()).await?;
+                let client = MatrixClient::connect(cfg.as_ref(), &store).await?;
                 connected.store(true, Ordering::Relaxed);
+                client_tx.send_replace(Some(client.clone()));
                 Ok(client)
             }
         };
@@ -79,6 +98,16 @@ async fn main() -> Result<()> {
             worker_shutdown,
         )
         .await;
+    });
+
+    let reply_handle = replies.map(|(transport, worker_config)| {
+        tokio::spawn(run_replies(
+            store.clone(),
+            transport,
+            worker_config,
+            client_rx,
+            shutdown_rx.clone(),
+        ))
     });
 
     // Periodically report queue depth to systemd (STATUS=), ping the watchdog,
@@ -120,7 +149,16 @@ async fn main() -> Result<()> {
     smtp_handle.abort();
     let _ = shutdown_tx.send(true);
 
-    match tokio::time::timeout(Duration::from_secs(SHUTDOWN_DRAIN_SECONDS), worker_handle).await {
+    let drain = async {
+        let delivery = worker_handle.await;
+        if let Some(reply_handle) = reply_handle {
+            if let Err(join_error) = reply_handle.await {
+                warn!(%join_error, "reply worker join error during shutdown");
+            }
+        }
+        delivery
+    };
+    match tokio::time::timeout(Duration::from_secs(SHUTDOWN_DRAIN_SECONDS), drain).await {
         Ok(Ok(())) => info!("delivery queue drained; exiting"),
         Ok(Err(join_error)) => warn!(%join_error, "delivery worker join error during shutdown"),
         Err(_) => warn!(
@@ -130,6 +168,30 @@ async fn main() -> Result<()> {
     monitor_handle.abort();
 
     Ok(())
+}
+
+/// Answer emails from Matrix: once the Matrix client is connected, keep it
+/// syncing (so answers reach its handler) and send queued answers by email,
+/// both until shutdown.
+async fn run_replies(
+    store: MessageStore,
+    transport: SmtpTransport,
+    config: ReplyWorkerConfig,
+    mut client_rx: watch::Receiver<Option<MatrixClient>>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let client = tokio::select! {
+        client = client_rx.wait_for(Option::is_some) => match client {
+            Ok(client) => client.clone(),
+            // The connect task ended without ever connecting.
+            Err(_) => return,
+        },
+        _ = shutdown.wait_for(|stop| *stop) => return,
+    };
+    let Some(client) = client else { return };
+
+    let worker = ReplyWorker::new(store, transport, client.clone(), config);
+    tokio::join!(client.sync_until(shutdown.clone()), worker.run(shutdown));
 }
 
 /// Periodically surface queue health: update the systemd `STATUS=` line, ping

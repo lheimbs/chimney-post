@@ -2,6 +2,8 @@
 //! transient failures with backoff, and tells the person who asked how it went.
 
 use super::mail::{build_email, MailTransport};
+use crate::config::Config;
+use crate::error::{ChimneyError, Result};
 use crate::queue::{backoff_seconds, MessageStore, OutgoingReply, StoredReply};
 use lettre::message::Mailbox;
 use std::future::Future;
@@ -42,6 +44,28 @@ pub struct ReplyWorkerConfig {
     pub retry_backoff: u64,
     /// How long reply targets and accepted events are kept.
     pub max_age_seconds: i64,
+}
+
+impl ReplyWorkerConfig {
+    /// The worker settings for `config`'s `[reply]` section, retrying like
+    /// `[queue]` does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ChimneyError::Config`] if `reply.from` is not an address.
+    pub fn from_config(config: &Config) -> Result<Self> {
+        let from = config
+            .reply
+            .from
+            .parse()
+            .map_err(|error| ChimneyError::Config(format!("invalid reply.from: {error}")))?;
+        Ok(Self {
+            from,
+            max_retries: config.queue.max_retries,
+            retry_backoff: config.queue.retry_backoff,
+            max_age_seconds: config.reply.max_age_seconds(),
+        })
+    }
 }
 
 /// Sends queued answers through a [`MailTransport`].

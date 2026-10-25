@@ -1,18 +1,26 @@
 use crate::config::Config;
 use crate::error::{ChimneyError, Result};
 use crate::matrix::format_message;
+use crate::matrix::replies::{on_room_message, ReplyContext};
 use crate::matrix::routing::Router;
-use crate::queue::{DeliveryFuture, Message, MessageSink};
+use crate::queue::{Delivered, DeliveryFuture, Message, MessageSink, MessageStore, OutgoingReply};
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::authentication::SessionTokens;
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::encryption::CryptoStoreError;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
-use matrix_sdk::ruma::{OwnedTransactionId, OwnedUserId};
+use matrix_sdk::ruma::{OwnedEventId, OwnedRoomId, OwnedTransactionId, OwnedUserId};
 use matrix_sdk::Client;
+use matrix_sdk::Room;
 use matrix_sdk::SessionMeta;
 use std::path::Path;
+use std::time::Duration;
+use tokio::sync::watch;
 use tracing::{debug, info, warn};
+
+/// Backoff bounds between failed rounds of the reply sync loop.
+const SYNC_RETRY_MIN: Duration = Duration::from_secs(2);
+const SYNC_RETRY_MAX: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct MatrixClient {
@@ -21,6 +29,8 @@ pub struct MatrixClient {
     user_id: OwnedUserId,
     require_e2ee: bool,
     message_template: String,
+    /// Whether `[reply]` is on, i.e. delivered emails should be answerable.
+    replies_enabled: bool,
 }
 
 /// Build a fresh client backed by the SQLite store at `store_path`.
@@ -104,7 +114,17 @@ fn reset_crypto_store(store_path: &str) -> Result<()> {
 }
 
 impl MatrixClient {
-    pub async fn connect(config: &Config) -> Result<Self> {
+    /// Log in, restore or create the E2EE device, and run an initial sync.
+    ///
+    /// With `[reply]` enabled, the handler for email answers is registered
+    /// before that first sync, so answers sent while the service was down are
+    /// picked up from it; `store` is where they are queued.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ChimneyError`] if the configuration is unusable or the
+    /// homeserver refuses the login or the initial sync.
+    pub async fn connect(config: &Config, store: &MessageStore) -> Result<Self> {
         let homeserver_url: url::Url = config.matrix.homeserver.parse().map_err(|error| {
             ChimneyError::Config(format!("invalid matrix.homeserver URL: {error}"))
         })?;
@@ -242,6 +262,13 @@ impl MatrixClient {
             warn!("could not verify device_id: homeserver returned no device id from whoami");
         }
 
+        if config.reply.enabled {
+            let context = ReplyContext::new(&config.reply, store.clone(), user_id.clone())?;
+            client.add_event_handler_context(context);
+            client.add_event_handler(on_room_message);
+            info!("answering emails from Matrix is enabled");
+        }
+
         // Perform initial sync to load encryption keys
         client
             .sync_once(SyncSettings::default())
@@ -278,14 +305,65 @@ impl MatrixClient {
             user_id,
             require_e2ee: config.matrix.require_e2ee,
             message_template: config.matrix.message_template.clone(),
+            replies_enabled: config.reply.enabled,
         })
+    }
+
+    /// Keep syncing with the homeserver until `shutdown` is set, so that
+    /// email answers posted in the rooms reach the reply handler. Sync errors
+    /// are logged and retried with a capped backoff; they never end the loop.
+    ///
+    /// Each round is a `sync_once` long-poll resuming from the sync token
+    /// matrix-sdk persists, rather than `Client::sync`: the latter's stream
+    /// future is deep enough that proving it `Send` for `tokio::spawn`
+    /// overflows the compiler's recursion limit.
+    pub async fn sync_until(&self, mut shutdown: watch::Receiver<bool>) {
+        let mut backoff = SYNC_RETRY_MIN;
+        loop {
+            let result = tokio::select! {
+                result = self.client.sync_once(SyncSettings::default()) => result,
+                _ = shutdown.wait_for(|stop| *stop) => return,
+            };
+            match result {
+                Ok(_) => backoff = SYNC_RETRY_MIN,
+                Err(error) => {
+                    warn!(%error, retry_seconds = backoff.as_secs(), "Matrix sync failed; retrying");
+                    tokio::select! {
+                        _ = tokio::time::sleep(backoff) => {}
+                        _ = shutdown.wait_for(|stop| *stop) => return,
+                    }
+                    backoff = (backoff * 2).min(SYNC_RETRY_MAX);
+                }
+            }
+        }
+    }
+
+    /// The room an answer was requested in and the requesting event, if the
+    /// client still knows the room.
+    pub(super) fn reply_room(&self, reply: &OutgoingReply) -> Option<(Room, OwnedEventId)> {
+        let room_id = OwnedRoomId::try_from(reply.room_id.as_str()).ok()?;
+        let event_id = OwnedEventId::try_from(reply.event_id.as_str()).ok()?;
+        let room = self.client.get_room(&room_id);
+        if room.is_none() {
+            warn!(room_id = %room_id, "cannot report on an email answer: room not joined");
+        }
+        Some((room?, event_id))
     }
 
     /// Send `message` to its routed room (see [`Router`]). `idempotency_key` is
     /// used as the Matrix transaction id so that a redelivery of the same queued
     /// message (e.g. after a lost response) is deduplicated by the homeserver
     /// within the session rather than appearing twice.
-    pub async fn send_message(&self, message: &Message, idempotency_key: &str) -> Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ChimneyError`] if formatting, joining the room or sending
+    /// fails, or the room is unencrypted while `matrix.require_e2ee` is set.
+    pub async fn send_message(
+        &self,
+        message: &Message,
+        idempotency_key: &str,
+    ) -> Result<Delivered> {
         let formatted = format_message(message, &self.message_template)?;
         let transaction_id = OwnedTransactionId::from(idempotency_key);
 
@@ -335,7 +413,8 @@ impl MatrixClient {
 
         let content = RoomMessageEventContent::text_plain(formatted);
 
-        room.send(content)
+        let sent = room
+            .send(content)
             .with_transaction_id(transaction_id)
             .await
             .map_err(|error| ChimneyError::Matrix(format!("Matrix send failed: {error}")))?;
@@ -346,15 +425,18 @@ impl MatrixClient {
             "Matrix message sent"
         );
 
-        Ok(())
+        Ok(Delivered {
+            room_id: room_id.to_string(),
+            event_id: sent.response.event_id.to_string(),
+        })
     }
 }
 
 impl MessageSink for MatrixClient {
     fn deliver<'a>(&'a self, message: &'a Message, idempotency_key: &'a str) -> DeliveryFuture<'a> {
         Box::pin(async move {
-            self.send_message(message, idempotency_key).await?;
-            Ok(None)
+            let delivered = self.send_message(message, idempotency_key).await?;
+            Ok(self.replies_enabled.then_some(delivered))
         })
     }
 }

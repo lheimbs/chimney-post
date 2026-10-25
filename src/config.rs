@@ -181,6 +181,13 @@ pub struct ReplyConfig {
     pub smtp: ReplySmtpConfig,
 }
 
+impl ReplyConfig {
+    /// `max_age_hours` in seconds, saturating instead of overflowing.
+    pub fn max_age_seconds(&self) -> i64 {
+        i64::try_from(self.max_age_hours.saturating_mul(3600)).unwrap_or(i64::MAX)
+    }
+}
+
 /// The SMTP server answers are submitted to.
 #[derive(Clone, Default, Deserialize)]
 pub struct ReplySmtpConfig {
@@ -830,6 +837,17 @@ mod tests {
         for host in ["10.0.0.1", "mail.localhost.example.com", "localhost.evil"] {
             assert!(!is_loopback_host(host), "{host}");
         }
+    }
+
+    #[test]
+    fn reply_max_age_saturates() {
+        let mut reply = ReplyConfig {
+            max_age_hours: 2,
+            ..Default::default()
+        };
+        assert_eq!(reply.max_age_seconds(), 7200);
+        reply.max_age_hours = u64::MAX;
+        assert_eq!(reply.max_age_seconds(), i64::MAX);
     }
 
     #[test]
