@@ -434,6 +434,26 @@ docker run -d --name chimney-post \
   process mid-drain. Nothing is lost permanently -- the outbox is on disk and is
   re-read at startup -- but an in-flight Matrix delivery is cut.
 
+### Docker Compose
+
+[`compose.example.yaml`](compose.example.yaml) is the same setup as the
+`docker run` command above -- loopback-only published port, a dedicated
+`chimney-post` network, the persistent data volume, the 45s stop timeout -- plus
+some extra hardening (`read_only`, `cap_drop: [ALL]`, `no-new-privileges`). Every
+point above applies unchanged.
+
+```bash
+cp compose.example.yaml compose.yaml
+cp config.example.toml config.toml      # set bind = "0.0.0.0:2525"
+echo 'MATRIX_PASSWORD=your-secret' > .env && chmod 600 .env
+docker compose up -d
+```
+
+Compose reads `MATRIX_PASSWORD` from `.env` (or the shell) and refuses to start
+if it is unset. The network has a fixed name, `chimney-post`, so containers in
+other compose projects can send mail by declaring it `external: true` and using
+`chimney-post:2525` as their SMTP server. The file shows how, in a comment.
+
 Verify the image the same way as the release tarballs (cosign signature + SLSA
 provenance) -- see the "Container Image" section of each release's notes for the
 exact commands.
