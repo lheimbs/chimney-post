@@ -520,6 +520,82 @@ jobs:
             test ! -e /usr/local/bin/chimney-post
           '
 
+  # CHIMNEY_MODE=compose, run on the runner itself rather than in a container,
+  # since it drives the runner's Docker daemon (the runner user is in the
+  # docker group). The compose files come from this commit via
+  # CHIMNEY_SOURCE_REF, so the job tests the installer and compose files in
+  # this checkout; the image is pinned to v0.3.3, a real signed release, so the
+  # verifier sidecar checks a real signature.
+  install-script-compose:
+    # Skipped on tag pushes, same reasoning as install-script above.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    needs: shellcheck
+    runs-on: ubuntu-latest
+    env:
+      CHIMNEY_MODE: compose
+      CHIMNEY_VERSION: v0.3.3
+      CHIMNEY_SOURCE_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+      CHIMNEY_MTA: "no"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rejects an invalid CHIMNEY_MODE
+        run: |
+          if CHIMNEY_MODE=bogus bash install.sh; then
+            echo "::error::expected failure for an invalid CHIMNEY_MODE value" >&2
+            exit 1
+          fi
+      - name: Install
+        run: timeout 300 bash install.sh
+      - name: Files are in place with the right modes
+        run: |
+          cd /opt/chimney-post
+          test -f compose.yaml
+          test -f compose.verify.yaml
+          grep -qx 'bind = "0.0.0.0:2525"' config.toml
+          # All owned by the invoking user, so they can be edited without sudo.
+          test "$(stat -c '%a %U' .)" = "755 $(id -un)"
+          test "$(stat -c '%a %U' config.toml)" = "644 $(id -un)"
+          test "$(stat -c '%a %U' .env)" = "600 $(id -un)"
+          grep -qxE 'CHIMNEY_DIGEST=sha256:[0-9a-f]{64}' .env
+          grep -qx 'COMPOSE_FILE=compose.yaml:compose.verify.yaml' .env
+      # Unreachable homeserver: SMTP must come up regardless, and CI shouldn't
+      # send failing logins to a real one.
+      - name: Starts, verifies and answers SMTP
+        run: |
+          cd /opt/chimney-post
+          sed -i 's/^MATRIX_PASSWORD=$/MATRIX_PASSWORD=dummy/' .env
+          sed -i 's#^homeserver = .*#homeserver = "http://127.0.0.1:1"#' config.toml
+          docker compose up -d
+          ok=0
+          for _ in $(seq 1 10); do
+            if printf 'QUIT\r\n' | nc -w 3 127.0.0.1 2525 | grep -q '^220 '; then
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+          docker compose logs
+          docker compose ps -a
+          test "$ok" -eq 1
+          test "$(docker inspect -f '{{.State.ExitCode}}' "$(docker compose ps -aq chimney-post-verify)")" = 0
+      - name: Re-running keeps the secret and user edits
+        run: |
+          echo '# user edit' >> /opt/chimney-post/compose.yaml
+          timeout 300 bash install.sh
+          cd /opt/chimney-post
+          grep -qx 'MATRIX_PASSWORD=dummy' .env
+          test "$(grep -c '^CHIMNEY_DIGEST=' .env)" = 1
+          tail -1 compose.yaml | grep -qx '# user edit'
+          grep -q 'homeserver = "http://127.0.0.1:1"' config.toml
+      - name: A release without compose files is refused cleanly
+        run: |
+          rc=0
+          CHIMNEY_SOURCE_REF= CHIMNEY_COMPOSE_DIR=/opt/cp-old bash install.sh > /tmp/out 2>&1 || rc=$?
+          cat /tmp/out
+          test "$rc" -ne 0
+          grep -q "do not ship the compose files" /tmp/out
+          test ! -e /opt/cp-old
+
   # install.sh's msmtp setup supports several OS families beyond Debian/Ubuntu
   # (see the comment above setup_msmtp in install.sh for what's verified where
   # and why). GitHub-hosted runners only come as Ubuntu, so those other

@@ -9,17 +9,29 @@
 # safe to re-run: it upgrades the binary and unit file in place but never
 # overwrites an existing config.toml or msmtprc.
 #
+# With CHIMNEY_MODE=compose it sets up Docker Compose instead of the binary
+# and unit: compose.yaml, compose.verify.yaml, config.toml and .env in
+# CHIMNEY_COMPOSE_DIR, with the release's image pinned by digest and its
+# cosign signature verified (by the pinned cosign image -- no cosign needed on
+# the host). Re-running it upgrades the digest and compose.verify.yaml but
+# never overwrites compose.yaml, config.toml or the secrets in .env.
+#
 # Run as a regular user -- installing the binary, config, and systemd unit
 # needs root, so the script calls `sudo` itself (only for the specific
 # commands that need it) and may prompt for your password.
 #
 # Configuration is via environment variables (all optional):
+#   CHIMNEY_MODE            "systemd" (default) or "compose" -- install the
+#                           binary and systemd unit, or a Docker Compose setup
 #   CHIMNEY_VERSION         Release tag to install, e.g. "v0.1.0" (default: latest)
 #   CHIMNEY_INSTALL_PREFIX  Directory for the binary (default: /usr/local/bin)
 #   CHIMNEY_CONFIG_DIR      Directory for config.toml (default: /etc/chimney-post)
 #   CHIMNEY_SKIP_SYSTEMD    1 to skip installing/enabling the systemd unit
 #   CHIMNEY_SKIP_VERIFY     1 to skip cosign signature verification (checksum
-#                           verification still runs; NOT recommended)
+#                           verification still runs; NOT recommended). Systemd
+#                           mode only: compose mode always verifies.
+#   CHIMNEY_COMPOSE_DIR     Compose mode: directory for compose.yaml, .env and
+#                           config.toml (default: /opt/chimney-post)
 #   CHIMNEY_MTA             "ask" (default), "yes", or "no" -- whether to set
 #                           up msmtp as a sendmail-compatible MTA
 #   CHIMNEY_NONINTERACTIVE  1 to never prompt (CHIMNEY_MTA=ask then behaves as "no")
@@ -27,10 +39,15 @@
 #                           older) without checking the host's glibc first.
 #                           The binary will not start if the host is too old;
 #                           mainly for testing the installer itself.
+#   CHIMNEY_SOURCE_REF      Git ref of this repository that the config
+#                           template, unit and compose files are downloaded
+#                           from (default: the release tag). Mainly for testing
+#                           the installer itself against a branch.
 set -euo pipefail
 
 REPO="lheimbs/chimney-post"
 
+MODE="${CHIMNEY_MODE:-systemd}"
 VERSION="${CHIMNEY_VERSION:-}"
 INSTALL_PREFIX="${CHIMNEY_INSTALL_PREFIX:-/usr/local/bin}"
 CONFIG_DIR="${CHIMNEY_CONFIG_DIR:-/etc/chimney-post}"
@@ -39,6 +56,8 @@ SKIP_VERIFY="${CHIMNEY_SKIP_VERIFY:-0}"
 MTA_MODE="${CHIMNEY_MTA:-ask}"
 NONINTERACTIVE="${CHIMNEY_NONINTERACTIVE:-0}"
 SKIP_GLIBC_CHECK="${CHIMNEY_SKIP_GLIBC_CHECK:-0}"
+COMPOSE_DIR="${CHIMNEY_COMPOSE_DIR:-/opt/chimney-post}"
+SOURCE_REF="${CHIMNEY_SOURCE_REF:-}"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
@@ -53,10 +72,23 @@ case "$MTA_MODE" in
   *) err "CHIMNEY_MTA must be one of: ask, yes, no (got '$MTA_MODE')" ;;
 esac
 
+case "$MODE" in
+  systemd|compose) ;;
+  *) err "CHIMNEY_MODE must be one of: systemd, compose (got '$MODE')" ;;
+esac
+
+# It becomes part of a download URL, so allow only what a branch, tag or
+# commit name needs.
+case "$SOURCE_REF" in
+  *[!A-Za-z0-9._/-]*) err "CHIMNEY_SOURCE_REF may only contain letters, digits and . _ / - (got '$SOURCE_REF')" ;;
+esac
+
 need_cmd curl
-need_cmd tar
-need_cmd sha256sum
 need_cmd install
+if [ "$MODE" = "systemd" ]; then
+  need_cmd tar
+  need_cmd sha256sum
+fi
 
 # Installing to $INSTALL_PREFIX, $CONFIG_DIR, and /etc/systemd/system needs
 # root. Run privileged commands through $SUDO rather than requiring the whole
@@ -73,6 +105,23 @@ else
   # it.
   sudo true || err "sudo authentication failed"
   SUDO="sudo"
+fi
+
+# Compose mode talks to the Docker daemon directly when this user may (the
+# docker group, rootless Docker), and through sudo otherwise. Settled here,
+# before anything is downloaded or written.
+DOCKER_SUDO=""
+if [ "$MODE" = "compose" ]; then
+  need_cmd docker
+  if docker info >/dev/null 2>&1; then
+    DOCKER_SUDO=""
+  elif [ -n "$SUDO" ] && $SUDO docker info >/dev/null 2>&1; then
+    DOCKER_SUDO="$SUDO"
+  else
+    err "cannot reach the Docker daemon -- is it running?"
+  fi
+  $DOCKER_SUDO docker compose version >/dev/null 2>&1 \
+    || err "the Docker Compose plugin ('docker compose') is required -- see https://docs.docker.com/compose/install/linux/"
 fi
 
 case "$(uname -s)" in
@@ -110,40 +159,46 @@ DL_BASE="https://github.com/${REPO}/releases/download/${VERSION}"
 # for those, check up front instead of installing a binary that can't run.
 # A ranged GET rather than HEAD: the asset URL redirects to a signed storage
 # URL that is only valid for the method it was issued for.
-TARGET="${ARCH}-unknown-linux-musl"
-probe_code=$(curl -sSL -r 0-0 -o /dev/null -w '%{http_code}' \
-  "$DL_BASE/chimney-post-${VERSION}-${TARGET}.tar.gz") \
-  || err "could not reach github.com to look up the ${VERSION} release assets"
-case "$probe_code" in
-  200|206) ;;
-  404)
-    TARGET="${ARCH}-unknown-linux-gnu"
-    if [ "$SKIP_GLIBC_CHECK" = "1" ]; then
-      warn "CHIMNEY_SKIP_GLIBC_CHECK=1 -- not checking glibc. ${VERSION} only has glibc builds and will not start on a host with an older glibc."
-    else
-      # What the glibc builds of the older releases were linked against.
-      MIN_GLIBC="2.38"
-      # Captured first, not piped: under `set -o pipefail`, `head`/`grep -q`
-      # closing the pipe early gives ldd a SIGPIPE and fails the whole pipeline.
-      ldd_out=$(ldd --version 2>&1 || true)
-      ldd_first=${ldd_out%%$'\n'*}
-      host_glibc=""
-      case "$ldd_first" in
-        *[Gg][Ll][Ii][Bb][Cc]*|*"GNU libc"*) host_glibc=$(printf '%s\n' "$ldd_first" | grep -oE '[0-9]+\.[0-9]+$' || true) ;;
-      esac
-      if [ -z "$host_glibc" ]; then
-        err "${VERSION} only has glibc builds, and this system's glibc version could not be determined (musl-based distro?). Install a newer release, or build from source (see README)."
+resolve_target() {
+  local probe_code ldd_out ldd_first host_glibc lowest_glibc
+  TARGET="${ARCH}-unknown-linux-musl"
+  probe_code=$(curl -sSL -r 0-0 -o /dev/null -w '%{http_code}' \
+    "$DL_BASE/chimney-post-${VERSION}-${TARGET}.tar.gz") \
+    || err "could not reach github.com to look up the ${VERSION} release assets"
+  case "$probe_code" in
+    200|206) ;;
+    404)
+      TARGET="${ARCH}-unknown-linux-gnu"
+      if [ "$SKIP_GLIBC_CHECK" = "1" ]; then
+        warn "CHIMNEY_SKIP_GLIBC_CHECK=1 -- not checking glibc. ${VERSION} only has glibc builds and will not start on a host with an older glibc."
+      else
+        # What the glibc builds of the older releases were linked against.
+        MIN_GLIBC="2.38"
+        # Captured first, not piped: under `set -o pipefail`, `head`/`grep -q`
+        # closing the pipe early gives ldd a SIGPIPE and fails the whole pipeline.
+        ldd_out=$(ldd --version 2>&1 || true)
+        ldd_first=${ldd_out%%$'\n'*}
+        host_glibc=""
+        case "$ldd_first" in
+          *[Gg][Ll][Ii][Bb][Cc]*|*"GNU libc"*) host_glibc=$(printf '%s\n' "$ldd_first" | grep -oE '[0-9]+\.[0-9]+$' || true) ;;
+        esac
+        if [ -z "$host_glibc" ]; then
+          err "${VERSION} only has glibc builds, and this system's glibc version could not be determined (musl-based distro?). Install a newer release, or build from source (see README)."
+        fi
+        lowest_glibc=$(printf '%s\n%s\n' "$MIN_GLIBC" "$host_glibc" | sort -V)
+        lowest_glibc=${lowest_glibc%%$'\n'*}
+        if [ "$lowest_glibc" != "$MIN_GLIBC" ]; then
+          err "${VERSION} only has glibc builds, which need glibc ${MIN_GLIBC} or newer; this system has ${host_glibc}. Install a newer release (they are statically linked), or build from source (see README)."
+        fi
       fi
-      lowest_glibc=$(printf '%s\n%s\n' "$MIN_GLIBC" "$host_glibc" | sort -V)
-      lowest_glibc=${lowest_glibc%%$'\n'*}
-      if [ "$lowest_glibc" != "$MIN_GLIBC" ]; then
-        err "${VERSION} only has glibc builds, which need glibc ${MIN_GLIBC} or newer; this system has ${host_glibc}. Install a newer release (they are statically linked), or build from source (see README)."
-      fi
-    fi
-    ;;
-  *) err "unexpected HTTP ${probe_code} looking up ${VERSION} release assets for ${TARGET}" ;;
-esac
-log "Installing chimney-post ${VERSION} (${TARGET})"
+      ;;
+    *) err "unexpected HTTP ${probe_code} looking up ${VERSION} release assets for ${TARGET}" ;;
+  esac
+  log "Installing chimney-post ${VERSION} (${TARGET})"
+}
+if [ "$MODE" = "systemd" ]; then
+  resolve_target
+fi
 
 # A local WORKDIR (not TMPDIR) so this never shadows the environment
 # variable of that name mktemp/tar/etc. themselves consult. Verified non-empty
@@ -155,110 +210,213 @@ if [ -z "$WORKDIR" ] || [ ! -d "$WORKDIR" ]; then
 fi
 trap 'if [ -n "${WORKDIR:-}" ] && [ -d "$WORKDIR" ]; then rm -rf -- "$WORKDIR"; fi' EXIT
 
-TARBALL="chimney-post-${VERSION}-${TARGET}.tar.gz"
-
 fetch() {
   # $1 = URL, $2 = destination filename in $WORKDIR
   curl -fsSL "$1" -o "$WORKDIR/$2" || err "failed to download $1"
 }
 
-log "Downloading release assets..."
-fetch "$DL_BASE/$TARBALL" "$TARBALL"
-fetch "$DL_BASE/$TARBALL.bundle" "$TARBALL.bundle"
-fetch "$DL_BASE/SHA256SUMS" "SHA256SUMS"
+RAW_BASE="https://raw.githubusercontent.com/${REPO}/${SOURCE_REF:-$VERSION}"
 
-log "Verifying checksum..."
-( cd "$WORKDIR" && sha256sum -c SHA256SUMS --ignore-missing ) \
-  || err "checksum verification failed -- downloaded file does not match SHA256SUMS"
+install_systemd() {
+  TARBALL="chimney-post-${VERSION}-${TARGET}.tar.gz"
 
-if [ "$SKIP_VERIFY" = "1" ]; then
-  warn "CHIMNEY_SKIP_VERIFY=1 -- skipping cosign signature verification. Only the checksum was checked, which proves the download wasn't corrupted, NOT that it came from the real release workflow."
-elif command -v cosign >/dev/null 2>&1; then
-  log "Verifying cosign signature..."
-  cosign verify-blob "$WORKDIR/$TARBALL" \
-    --bundle "$WORKDIR/$TARBALL.bundle" \
-    --certificate-identity "https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/${VERSION}" \
-    --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-    --certificate-github-workflow-repository "${REPO}" \
-    || err "cosign signature verification failed -- refusing to install a tarball that doesn't verify against ${REPO}'s release workflow"
-else
-  err "cosign is required to verify the release signature but was not found. Install it from https://docs.sigstore.dev/cosign/system_config/installation/ and re-run, or set CHIMNEY_SKIP_VERIFY=1 to install with checksum-only verification (not recommended)."
-fi
+  log "Downloading release assets..."
+  fetch "$DL_BASE/$TARBALL" "$TARBALL"
+  fetch "$DL_BASE/$TARBALL.bundle" "$TARBALL.bundle"
+  fetch "$DL_BASE/SHA256SUMS" "SHA256SUMS"
 
-log "Installing binary to ${INSTALL_PREFIX}/chimney-post..."
-tar -xzf "$WORKDIR/$TARBALL" -C "$WORKDIR" chimney-post
-$SUDO install -d -m 0755 "$INSTALL_PREFIX"
-$SUDO install -m 0755 -o root -g root "$WORKDIR/chimney-post" "$INSTALL_PREFIX/chimney-post"
+  log "Verifying checksum..."
+  ( cd "$WORKDIR" && sha256sum -c SHA256SUMS --ignore-missing ) \
+    || err "checksum verification failed -- downloaded file does not match SHA256SUMS"
 
-RAW_BASE="https://raw.githubusercontent.com/${REPO}/${VERSION}"
-
-# $CONFIG_DIR is root-owned, so an existing config.toml is only checked
-# for/written to via $SUDO -- a plain `[ -e ]` as a non-root user would still
-# work (0755 dirs are traversable/readable by anyone), but $SUDO keeps this
-# correct even if the directory's permissions are tightened. Config.toml is
-# needed regardless of init system, so this runs even under
-# CHIMNEY_SKIP_SYSTEMD=1 -- that flag only controls the systemd unit below.
-$SUDO install -d -m 0755 "$CONFIG_DIR"
-
-if $SUDO test -e "$CONFIG_DIR/config.toml"; then
-  log "Leaving existing $CONFIG_DIR/config.toml in place."
-else
-  log "Writing template config to ${CONFIG_DIR}/config.toml..."
-  fetch_config_url="$RAW_BASE/config.example.toml"
-  curl -fsSL "$fetch_config_url" -o "$WORKDIR/config.toml" \
-    || err "failed to download $fetch_config_url"
-  $SUDO install -m 0600 "$WORKDIR/config.toml" "$CONFIG_DIR/config.toml"
-fi
-
-if [ "$SKIP_SYSTEMD" = "1" ]; then
-  log "CHIMNEY_SKIP_SYSTEMD=1 -- skipping systemd unit installation."
-elif command -v systemctl >/dev/null 2>&1; then
-  log "Installing systemd unit..."
-  curl -fsSL "$RAW_BASE/systemd/chimney-post.service" -o "$WORKDIR/chimney-post.service" \
-    || err "failed to download $RAW_BASE/systemd/chimney-post.service"
-  # The unit hardcodes both /usr/local/bin and /etc/chimney-post; keep each in
-  # sync if the binary or the config went somewhere else. Every rewrite is
-  # checked afterwards rather than trusted: sed reports success when it matched
-  # nothing, and silently installing a unit that still points at the default
-  # paths would fail later, at `systemctl start`, with a much worse error.
-  if [ "$INSTALL_PREFIX" != "/usr/local/bin" ]; then
-    sed -i "s|^ExecStart=/usr/local/bin/chimney-post|ExecStart=${INSTALL_PREFIX}/chimney-post|" \
-      "$WORKDIR/chimney-post.service"
-    grep -qF "ExecStart=${INSTALL_PREFIX}/chimney-post" "$WORKDIR/chimney-post.service" \
-      || err "could not point the unit's ExecStart at ${INSTALL_PREFIX} -- install /etc/systemd/system/chimney-post.service by hand (see README)"
-  fi
-  if [ "$CONFIG_DIR" != "/etc/chimney-post" ]; then
-    # Two spellings, because install.sh is fetched from main but the unit from
-    # the release tag: current units pass the config as a systemd credential,
-    # units from releases before that set CHIMNEY_CONFIG directly.
-    sed -i \
-      -e "s|^LoadCredential=config:/etc/chimney-post/config.toml|LoadCredential=config:${CONFIG_DIR}/config.toml|" \
-      -e "s|^Environment=CHIMNEY_CONFIG=/etc/chimney-post/config.toml|Environment=CHIMNEY_CONFIG=${CONFIG_DIR}/config.toml|" \
-      "$WORKDIR/chimney-post.service"
-    if ! grep -qF "LoadCredential=config:${CONFIG_DIR}/config.toml" "$WORKDIR/chimney-post.service" \
-       && ! grep -qF "Environment=CHIMNEY_CONFIG=${CONFIG_DIR}/config.toml" "$WORKDIR/chimney-post.service"; then
-      err "could not point the unit at ${CONFIG_DIR}/config.toml -- install /etc/systemd/system/chimney-post.service by hand (see README)"
-    fi
-  fi
-  $SUDO install -m 0644 "$WORKDIR/chimney-post.service" /etc/systemd/system/chimney-post.service
-  # The unit file is worth installing wherever systemctl exists -- including
-  # container images being built to run systemd later -- but the reload is only
-  # meaningful when systemd is the running init. WSL without systemd enabled,
-  # LXC/chroots and many container images ship the binaries without PID 1, and
-  # there `daemon-reload` fails with "System has not been booted with systemd";
-  # under `set -e` that aborted the installer after everything was already in
-  # place, swallowing the "Next steps" block. /run/systemd/system exists only
-  # when systemd really is init, so gate on it -- and warn rather than exit if
-  # the reload fails anyway.
-  if [ -d /run/systemd/system ]; then
-    $SUDO systemctl daemon-reload \
-      || warn "systemctl daemon-reload failed -- run it yourself before starting the service"
+  if [ "$SKIP_VERIFY" = "1" ]; then
+    warn "CHIMNEY_SKIP_VERIFY=1 -- skipping cosign signature verification. Only the checksum was checked, which proves the download wasn't corrupted, NOT that it came from the real release workflow."
+  elif command -v cosign >/dev/null 2>&1; then
+    log "Verifying cosign signature..."
+    cosign verify-blob "$WORKDIR/$TARBALL" \
+      --bundle "$WORKDIR/$TARBALL.bundle" \
+      --certificate-identity "https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/${VERSION}" \
+      --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+      --certificate-github-workflow-repository "${REPO}" \
+      || err "cosign signature verification failed -- refusing to install a tarball that doesn't verify against ${REPO}'s release workflow"
   else
-    warn "systemd is not the running init here -- unit installed, but not reloaded. Run 'systemctl daemon-reload' once you boot with systemd."
+    err "cosign is required to verify the release signature but was not found. Install it from https://docs.sigstore.dev/cosign/system_config/installation/ and re-run, or set CHIMNEY_SKIP_VERIFY=1 to install with checksum-only verification (not recommended)."
   fi
-  log "Service unit installed (not started -- fill in ${CONFIG_DIR}/config.toml first, see 'Next steps' below)."
+
+  log "Installing binary to ${INSTALL_PREFIX}/chimney-post..."
+  tar -xzf "$WORKDIR/$TARBALL" -C "$WORKDIR" chimney-post
+  $SUDO install -d -m 0755 "$INSTALL_PREFIX"
+  $SUDO install -m 0755 -o root -g root "$WORKDIR/chimney-post" "$INSTALL_PREFIX/chimney-post"
+
+  # $CONFIG_DIR is root-owned, so an existing config.toml is only checked
+  # for/written to via $SUDO -- a plain `[ -e ]` as a non-root user would still
+  # work (0755 dirs are traversable/readable by anyone), but $SUDO keeps this
+  # correct even if the directory's permissions are tightened. Config.toml is
+  # needed regardless of init system, so this runs even under
+  # CHIMNEY_SKIP_SYSTEMD=1 -- that flag only controls the systemd unit below.
+  $SUDO install -d -m 0755 "$CONFIG_DIR"
+
+  if $SUDO test -e "$CONFIG_DIR/config.toml"; then
+    log "Leaving existing $CONFIG_DIR/config.toml in place."
+  else
+    log "Writing template config to ${CONFIG_DIR}/config.toml..."
+    fetch_config_url="$RAW_BASE/config.example.toml"
+    curl -fsSL "$fetch_config_url" -o "$WORKDIR/config.toml" \
+      || err "failed to download $fetch_config_url"
+    $SUDO install -m 0600 "$WORKDIR/config.toml" "$CONFIG_DIR/config.toml"
+  fi
+
+  if [ "$SKIP_SYSTEMD" = "1" ]; then
+    log "CHIMNEY_SKIP_SYSTEMD=1 -- skipping systemd unit installation."
+  elif command -v systemctl >/dev/null 2>&1; then
+    log "Installing systemd unit..."
+    curl -fsSL "$RAW_BASE/systemd/chimney-post.service" -o "$WORKDIR/chimney-post.service" \
+      || err "failed to download $RAW_BASE/systemd/chimney-post.service"
+    # The unit hardcodes both /usr/local/bin and /etc/chimney-post; keep each in
+    # sync if the binary or the config went somewhere else. Every rewrite is
+    # checked afterwards rather than trusted: sed reports success when it matched
+    # nothing, and silently installing a unit that still points at the default
+    # paths would fail later, at `systemctl start`, with a much worse error.
+    if [ "$INSTALL_PREFIX" != "/usr/local/bin" ]; then
+      sed -i "s|^ExecStart=/usr/local/bin/chimney-post|ExecStart=${INSTALL_PREFIX}/chimney-post|" \
+        "$WORKDIR/chimney-post.service"
+      grep -qF "ExecStart=${INSTALL_PREFIX}/chimney-post" "$WORKDIR/chimney-post.service" \
+        || err "could not point the unit's ExecStart at ${INSTALL_PREFIX} -- install /etc/systemd/system/chimney-post.service by hand (see README)"
+    fi
+    if [ "$CONFIG_DIR" != "/etc/chimney-post" ]; then
+      # Two spellings, because install.sh is fetched from main but the unit from
+      # the release tag: current units pass the config as a systemd credential,
+      # units from releases before that set CHIMNEY_CONFIG directly.
+      sed -i \
+        -e "s|^LoadCredential=config:/etc/chimney-post/config.toml|LoadCredential=config:${CONFIG_DIR}/config.toml|" \
+        -e "s|^Environment=CHIMNEY_CONFIG=/etc/chimney-post/config.toml|Environment=CHIMNEY_CONFIG=${CONFIG_DIR}/config.toml|" \
+        "$WORKDIR/chimney-post.service"
+      if ! grep -qF "LoadCredential=config:${CONFIG_DIR}/config.toml" "$WORKDIR/chimney-post.service" \
+         && ! grep -qF "Environment=CHIMNEY_CONFIG=${CONFIG_DIR}/config.toml" "$WORKDIR/chimney-post.service"; then
+        err "could not point the unit at ${CONFIG_DIR}/config.toml -- install /etc/systemd/system/chimney-post.service by hand (see README)"
+      fi
+    fi
+    $SUDO install -m 0644 "$WORKDIR/chimney-post.service" /etc/systemd/system/chimney-post.service
+    # The unit file is worth installing wherever systemctl exists -- including
+    # container images being built to run systemd later -- but the reload is only
+    # meaningful when systemd is the running init. WSL without systemd enabled,
+    # LXC/chroots and many container images ship the binaries without PID 1, and
+    # there `daemon-reload` fails with "System has not been booted with systemd";
+    # under `set -e` that aborted the installer after everything was already in
+    # place, swallowing the "Next steps" block. /run/systemd/system exists only
+    # when systemd really is init, so gate on it -- and warn rather than exit if
+    # the reload fails anyway.
+    if [ -d /run/systemd/system ]; then
+      $SUDO systemctl daemon-reload \
+        || warn "systemctl daemon-reload failed -- run it yourself before starting the service"
+    else
+      warn "systemd is not the running init here -- unit installed, but not reloaded. Run 'systemctl daemon-reload' once you boot with systemd."
+    fi
+    log "Service unit installed (not started -- fill in ${CONFIG_DIR}/config.toml first, see 'Next steps' below)."
+  else
+    warn "systemctl not found -- skipping systemd unit installation."
+  fi
+}
+
+install_compose() {
+  local image="ghcr.io/${REPO}" pull_out digest
+  local -a owner
+  log "Installing chimney-post ${VERSION} (Docker Compose, ${image}) into ${COMPOSE_DIR}"
+  if [ "$SKIP_VERIFY" = "1" ]; then
+    warn "CHIMNEY_SKIP_VERIFY=1 has no effect in compose mode -- verifying anyway (it needs no cosign on this host)."
+  fi
+
+  # Releases up to v0.3.3 predate the compose files, so a 404 here is the
+  # likely cause; say so rather than leaving a bare URL.
+  curl -fsSL "$RAW_BASE/compose.verify.yaml" -o "$WORKDIR/compose.verify.yaml" \
+    || err "failed to download compose.verify.yaml for ${VERSION} -- releases up to v0.3.3 do not ship the compose files, so compose mode needs a newer CHIMNEY_VERSION"
+  fetch "$RAW_BASE/compose.example.yaml" compose.yaml
+
+  # The directory and everything in it belong to the invoking user, so the
+  # config and .env can be edited (and `docker compose` run, given the docker
+  # group) without sudo. That grants nothing new: this user can already sudo,
+  # and the docker group is root-equivalent anyway.
+  owner=(-o "$(id -u)" -g "$(id -g)")
+  $SUDO install -d -m 0755 "${owner[@]}" "$COMPOSE_DIR"
+
+  # compose.yaml is the user's to edit (extra services, an access token
+  # instead of a password), so it is only ever written once. compose.verify.yaml
+  # carries the pinned cosign image and the signing identity, which are ours to
+  # keep current, so it is refreshed on every run.
+  if $SUDO test -e "$COMPOSE_DIR/compose.yaml"; then
+    log "Leaving existing $COMPOSE_DIR/compose.yaml in place."
+  else
+    $SUDO install -m 0644 "${owner[@]}" "$WORKDIR/compose.yaml" "$COMPOSE_DIR/compose.yaml"
+  fi
+  $SUDO install -m 0644 "${owner[@]}" "$WORKDIR/compose.verify.yaml" "$COMPOSE_DIR/compose.verify.yaml"
+
+  # 0644, not the 0600 of systemd mode: the container runs as uid 65532 and
+  # has to read it, and the file holds only ${MATRIX_PASSWORD}-style
+  # placeholders -- the secrets go in .env. The bind must be 0.0.0.0 inside a
+  # container (see the README's Docker section); the published port in
+  # compose.yaml is what keeps it on the host's loopback.
+  if $SUDO test -e "$COMPOSE_DIR/config.toml"; then
+    log "Leaving existing $COMPOSE_DIR/config.toml in place."
+  else
+    log "Writing template config to ${COMPOSE_DIR}/config.toml..."
+    fetch "$RAW_BASE/config.example.toml" config.toml
+    sed -i 's|^bind = "127.0.0.1:2525"|bind = "0.0.0.0:2525"|' "$WORKDIR/config.toml"
+    grep -qx 'bind = "0.0.0.0:2525"' "$WORKDIR/config.toml" \
+      || err "could not set bind = \"0.0.0.0:2525\" in the config template -- write ${COMPOSE_DIR}/config.toml by hand (see README)"
+    $SUDO install -m 0644 "${owner[@]}" "$WORKDIR/config.toml" "$COMPOSE_DIR/config.toml"
+  fi
+
+  # The digest `docker pull` reports is the multi-arch index's, which is what
+  # the release workflow signs. Not `docker image inspect`'s RepoDigests: that
+  # lists every digest the image was ever pulled by, per-arch ones included.
+  log "Pulling ${image}:${VERSION}..."
+  pull_out=$($DOCKER_SUDO docker pull "${image}:${VERSION}" 2>&1) \
+    || err "failed to pull ${image}:${VERSION}: ${pull_out##*$'\n'}"
+  digest=$(printf '%s\n' "$pull_out" | sed -n 's/^Digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p')
+  [ -n "$digest" ] || err "could not read the image digest from 'docker pull' output"
+
+  # Verified by compose.verify.yaml's own sidecar, so the cosign image and the
+  # signing identity live in one place. Everything it needs comes from the
+  # environment rather than .env, so .env only changes once the new digest has
+  # verified. Compose interpolates the whole project even for `run`, so
+  # compose.yaml's required secret needs a stand-in the verifier never sees.
+  log "Verifying the cosign signature of ${image}@${digest}..."
+  ( cd "$COMPOSE_DIR" && $DOCKER_SUDO env \
+      COMPOSE_FILE=compose.yaml:compose.verify.yaml \
+      CHIMNEY_DIGEST="$digest" \
+      MATRIX_PASSWORD=unused MATRIX_ACCESS_TOKEN=unused \
+      docker compose run --rm chimney-post-verify ) \
+    || err "cosign signature verification failed for ${image}@${digest} -- refusing to install an image that doesn't verify against ${REPO}'s release workflow"
+
+  # .env holds the user's secrets plus two lines this installer owns: those
+  # are replaced on every run, everything else is kept. 0600 because it holds
+  # the secret.
+  if $SUDO test -e "$COMPOSE_DIR/.env"; then
+    $SUDO cat "$COMPOSE_DIR/.env" \
+      | grep -v -e '^CHIMNEY_DIGEST=' -e '^COMPOSE_FILE=' -e '^# Managed by install.sh' \
+      > "$WORKDIR/env" || true
+  else
+    cat > "$WORKDIR/env" <<'EOF'
+# Secrets for chimney-post, substituted into config.toml's ${...}
+# placeholders. Set the one config.toml uses. For an access token, also swap
+# the MATRIX_PASSWORD line in compose.yaml for its MATRIX_ACCESS_TOKEN one.
+MATRIX_PASSWORD=
+# MATRIX_ACCESS_TOKEN=
+EOF
+  fi
+  cat >> "$WORKDIR/env" <<EOF
+# Managed by install.sh -- re-running it to upgrade rewrites these two lines.
+CHIMNEY_DIGEST=${digest}
+COMPOSE_FILE=compose.yaml:compose.verify.yaml
+EOF
+  $SUDO install -m 0600 "${owner[@]}" "$WORKDIR/env" "$COMPOSE_DIR/.env"
+  log "Compose setup installed and verified (not started -- see 'Next steps' below)."
+}
+
+if [ "$MODE" = "compose" ]; then
+  install_compose
 else
-  warn "systemctl not found -- skipping systemd unit installation."
+  install_systemd
 fi
 
 # --- Optional MTA setup (msmtp) ---------------------------------------------
@@ -483,6 +641,21 @@ case "$MTA_MODE" in
 esac
 
 log "Done."
+if [ "$MODE" = "compose" ]; then
+  cat >&2 <<EOF
+
+Next steps:
+  1. Edit ${COMPOSE_DIR}/config.toml with your homeserver, user_id, and room_id.
+     Keep bind = "0.0.0.0:2525": inside the container that is required, and
+     compose.yaml publishes the port on the host's 127.0.0.1 only.
+  2. Set MATRIX_PASSWORD (or MATRIX_ACCESS_TOKEN) in ${COMPOSE_DIR}/.env.
+  3. Start it:
+       cd ${COMPOSE_DIR} && ${DOCKER_SUDO:+sudo }docker compose up -d
+
+To upgrade later, re-run this installer, then 'docker compose up -d' again.
+EOF
+  exit 0
+fi
 cat >&2 <<EOF
 
 Next steps:

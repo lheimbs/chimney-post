@@ -95,6 +95,24 @@ It never overwrites an existing `config.toml` or `/etc/msmtprc`, and is safe to 
 
 On Arch, accepting the `msmtp` offer runs a full `pacman -Syu`, which upgrades every package on the system — partial upgrades are unsupported there. Set `CHIMNEY_MTA=no` if you would rather install it yourself.
 
+#### With Docker Compose instead of systemd
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lheimbs/chimney-post/main/install.sh \
+  | CHIMNEY_MODE=compose bash
+```
+
+This sets up the [Docker Compose files](#docker-compose) in `/opt/chimney-post` (or `CHIMNEY_COMPOSE_DIR`) in place of the binary and unit:
+- `compose.yaml` and `compose.verify.yaml`.
+- `config.toml`, with `bind` already set to `0.0.0.0:2525`.
+- A `0600` `.env` for your secret.
+
+The directory and its files belong to you, so you can edit them without `sudo`.
+
+The release's image is pinned by digest and its cosign signature is verified, both during the install and again on every `docker compose up` (see [Verifying the signature on every start](#verifying-the-signature-on-every-start)). Verification runs in the pinned cosign image, so this mode needs Docker and the Compose plugin but not cosign on the host.
+
+Re-running the installer upgrades. It moves `CHIMNEY_DIGEST` in `.env` to the new release, but only after the new digest has verified, and it refreshes `compose.verify.yaml`. It never touches `compose.yaml`, `config.toml` or your secrets. After a re-run, `docker compose up -d` switches to the new image. The `msmtp` offer works the same as in systemd mode. Compose mode needs a release newer than v0.3.3, because v0.3.3 and earlier releases don't ship the compose files.
+
 ### Pre-built Binaries
 
 Release binaries for `x86_64` and `aarch64` Linux are published on the [Releases page](https://github.com/lheimbs/chimney-post/releases). This section documents the manual steps that `install.sh` above automates, useful if you want to inspect each step yourself.
