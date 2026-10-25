@@ -454,6 +454,36 @@ if it is unset. The network has a fixed name, `chimney-post`, so containers in
 other compose projects can send mail by declaring it `external: true` and using
 `chimney-post:2525` as their SMTP server. The file shows how, in a comment.
 
+#### Verifying the signature on every start
+
+[`compose.verify.yaml`](compose.verify.yaml) is an optional override that pins
+chimney-post by digest and adds a one-shot cosign sidecar. The sidecar must
+verify that digest's signature before chimney-post is allowed to start:
+
+```bash
+docker pull ghcr.io/lheimbs/chimney-post:v0.3.3      # note the "Digest: sha256:..." line
+echo 'CHIMNEY_DIGEST=sha256:...' >> .env
+echo 'COMPOSE_FILE=compose.yaml:compose.verify.yaml' >> .env
+docker compose up -d
+```
+
+- **Why a digest:** a digest identifies exactly one image's content, so the image
+  cosign verified is the image that runs. A sidecar checking a tag like `:latest`
+  would only check what the tag points to in the registry at that moment, not the
+  image Docker already has locally. `CHIMNEY_DIGEST` takes only the
+  `sha256:...` part, so a tag put there by mistake is an invalid reference and
+  nothing starts.
+- **Same check as the release notes:** the sidecar verifies against the same
+  identity, a keyless signature from this repository's `release.yml` for a
+  `vX.Y.Z` tag. The cosign image itself is pinned by digest too.
+- **Upgrading:** `docker pull` the new tag, replace `CHIMNEY_DIGEST`, and run
+  `docker compose up -d`.
+- **When GHCR or Sigstore is down:** `up` fails instead of starting an
+  unverified image. To start the already-verified container anyway, run
+  `docker compose up -d --no-deps chimney-post`. Restarts by the Docker daemon
+  (e.g. after a reboot) skip the sidecar. That's fine, because the digest, and
+  so the image, hasn't changed since it was verified.
+
 Verify the image the same way as the release tarballs (cosign signature + SLSA
 provenance) -- see the "Container Image" section of each release's notes for the
 exact commands.
